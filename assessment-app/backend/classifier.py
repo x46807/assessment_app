@@ -1,0 +1,40 @@
+import os
+from google import genai
+from google.genai import types
+from pydantic import BaseModel, Field
+from typing import List, Literal
+
+class ClassifiedSample(BaseModel):
+    detected_typology: Literal[
+        "SCENARIO_VIGNETTE",
+        "STIMULUS_INTERPRETATION",
+        "DATA_EVALUATION",
+        "ASSERTION_REASON",
+        "COMPARATIVE_PAIRED",
+        "CONCEPT_APPLICATION"
+    ]
+    detected_bloom_level: Literal["Level 3: Apply", "Level 4: Analyze", "Level 5: Evaluate"]
+    structural_features: List[str]
+    recommended_prompt_guidance: str
+
+class SampleClassifier:
+    def __init__(self, api_key: str = None):
+        self.client = genai.Client(api_key=api_key or os.environ.get("GEMINI_API_KEY"))
+
+    def analyze_samples(self, raw_sample_text: str) -> ClassifiedSample:
+        prompt = (
+            "You are an expert psychometrician. Analyze the following sample assessment questions.\n"
+            "Identify their core typology from our catalog, their cognitive depth (Bloom's Taxonomy), and structural mechanics.\n\n"
+            "SAMPLE QUESTIONS:\n"
+            + raw_sample_text
+        )
+        response = self.client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=ClassifiedSample,
+                temperature=0.1
+            )
+        )
+        return ClassifiedSample.model_validate_json(response.text)
