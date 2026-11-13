@@ -6,6 +6,7 @@ from google.genai import types
 from stimulus.wikimedia import WikimediaProvider
 from stimulus.diagrams import DiagramProvider
 from generation_schemas import StimulusContext
+from gemini_schema import gemini_response_schema
 
 class StimulusPlan(BaseModel):
     stimulus_modality: Literal["map_or_illustration", "primary_source_text", "diagram_flowchart", "data_table"]
@@ -25,7 +26,7 @@ class StimulusOrchestrator:
         response = self.client.models.generate_content(
             model="gemini-2.5-flash",
             contents=plan_prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=StimulusPlan, temperature=0.3)
+            config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=gemini_response_schema(StimulusPlan), temperature=0.3)
         )
         plan = StimulusPlan.model_validate_json(response.text)
 

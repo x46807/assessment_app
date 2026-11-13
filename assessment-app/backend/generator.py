@@ -4,6 +4,7 @@ from typing import List, Optional
 from google import genai
 from google.genai import types
 from models import IngestionResult
+from gemini_schema import gemini_response_schema
 from generation_schemas import GenerationBatchOutput, PsychometricItem
 from stimulus.stimulus_orchestrator import StimulusOrchestrator
 
@@ -99,7 +100,7 @@ class QuestionGeneratorEngine:
             config=types.GenerateContentConfig(
                 system_instruction=self._build_system_instruction(),
                 response_mime_type="application/json",
-                response_schema=GenerationBatchOutput,
+                response_schema=gemini_response_schema(GenerationBatchOutput),
                 temperature=0.2,
             )
         )

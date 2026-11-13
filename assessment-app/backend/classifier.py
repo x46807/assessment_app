@@ -4,6 +4,8 @@ from google.genai import types
 from pydantic import BaseModel, Field
 from typing import List, Literal
 
+from gemini_schema import gemini_response_schema
+
 class ClassifiedSample(BaseModel):
     detected_typology: Literal[
         "SCENARIO_VIGNETTE",
@@ -33,7 +35,7 @@ class SampleClassifier:
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=ClassifiedSample,
+                response_schema=gemini_response_schema(ClassifiedSample),
                 temperature=0.1
             )
         )
