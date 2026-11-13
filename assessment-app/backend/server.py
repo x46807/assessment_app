@@ -95,6 +95,19 @@ def build_example_style(example_sources):
     return effective_typology, style_guidance, style_examples
 
 
+def fill_chunk_source_files(chunks, default_file):
+    """Fill in source_file on chunks ingested before it was recorded.
+
+    Chunks stored before the source-file change have source_file None.
+    Their TopicSource title is the uploaded filename (or the URL title),
+    so use it as the file identifier instead of re-ingesting.
+    """
+    for chunk in chunks:
+        if not getattr(chunk, "source_file", None):
+            chunk.source_file = default_file
+    return chunks
+
+
 def get_bucket_or_404(db, bucket_id, user_id):
     bucket = db.query(db_models.TopicBucket).filter(
         db_models.TopicBucket.id == bucket_id,
@@ -346,7 +359,7 @@ def generate_bucket_test(
     all_chunks = []
     for src in content_sources:
         src_data = IngestionResult.model_validate(src.extracted_content)
-        all_chunks.extend(src_data.chunks)
+        all_chunks.extend(fill_chunk_source_files(src_data.chunks, src.title))
 
     composite_source = IngestionResult(
         source_title=bucket.title,

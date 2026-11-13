@@ -14,7 +14,7 @@ export interface QuestionItem {
   correct_option: string;
   pedagogical_feedback: string;
   distractor_rationales: Record<string, string>;
-  citation: { source_title: string; location_type: "page" | "timestamp" | "section"; location_value: string; verbatim_grounding_quote: string };
+  citation: { source_title: string; source_file?: string; location_type: "page" | "timestamp" | "section" | "line"; location_value: string; verbatim_grounding_quote: string };
 }
 
 export default function InteractiveQuiz({ items }: { items: QuestionItem[] }) {
@@ -98,7 +98,8 @@ export default function InteractiveQuiz({ items }: { items: QuestionItem[] }) {
                 <div className="flex items-start space-x-3 text-xs bg-amber-50/60 border border-amber-200/60 rounded-xl p-4 text-amber-950">
                   {item.citation.location_type === "timestamp" ? <Clock className="h-4 w-4 text-amber-700 flex-shrink-0" /> : <FileText className="h-4 w-4 text-amber-700 flex-shrink-0" />}
                   <div>
-                    <p className="font-bold text-amber-900">{item.citation.source_title} ({item.citation.location_type.toUpperCase()}: {item.citation.location_value})</p>
+                    <p className="font-bold text-amber-900">{item.citation.source_file || item.citation.source_title}</p>
+                    <p className="text-amber-800 mt-0.5">{item.citation.location_value}</p>
                     <p className="italic text-slate-700 bg-white/70 p-2.5 rounded border border-amber-100 mt-1">"{item.citation.verbatim_grounding_quote}"</p>
                   </div>
                 </div>

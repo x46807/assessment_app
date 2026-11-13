@@ -14,7 +14,7 @@ class WebParser:
         meta = trafilatura.extract_metadata(downloaded)
         page_title = title or (meta.title if meta and meta.title else url)
 
-        chunks = [SourceChunk(chunk_index=1, locator_type="section", locator_value="Main Content", content=text)]
+        chunks = [SourceChunk(chunk_index=1, locator_type="section", locator_value="Main Content", content=text, source_file=page_title)]
         return IngestionResult(source_title=page_title, source_type="web", total_chunks=1, chunks=chunks)
 
     @staticmethod
@@ -27,5 +27,20 @@ class WebParser:
         if res.status_code != 200:
             raise PermissionError("Could not access Google Doc. Verify it is set to 'Anyone with link can view'.")
 
-        chunks = [SourceChunk(chunk_index=1, locator_type="section", locator_value="Full Document", content=res.text)]
-        return IngestionResult(source_title=title or f"Google Doc ({doc_id[:8]})", source_type="gdoc", total_chunks=1, chunks=chunks)
+        doc_title = title or f"Google Doc ({doc_id[:8]})"
+        chunks = []
+        lines = res.text.splitlines()
+        for chunk_idx, start in enumerate(range(0, len(lines), 40), start=1):
+            window = lines[start:start + 40]
+            if not any(line.strip() for line in window):
+                continue
+            chunks.append(SourceChunk(
+                chunk_index=chunk_idx,
+                locator_type="line",
+                locator_value=f"Lines {start + 1}-{start + len(window)}",
+                content="\n".join(window),
+                source_file=doc_title,
+            ))
+        if not chunks:
+            chunks = [SourceChunk(chunk_index=1, locator_type="line", locator_value="Lines 1-1", content="", source_file=doc_title)]
+        return IngestionResult(source_title=doc_title, source_type="gdoc", total_chunks=len(chunks), chunks=chunks)

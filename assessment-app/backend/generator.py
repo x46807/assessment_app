@@ -31,7 +31,11 @@ class QuestionGeneratorEngine:
             "   - Extract the exact anchor (Page number, Section name, or Timestamp interval).\n\n"
             "5. STYLE EXAMPLES ARE NOT CONTENT:\n"
             "   - When example questions are supplied, they define the FORMAT, STRUCTURE, PHRASING, and COGNITIVE LEVEL to imitate. They are the primary style reference.\n"
-            "   - NEVER ground an item in an example question, NEVER use an example's facts or answers as question content, and NEVER cite an example question as the grounding quote or citation anchor. Grounding comes only from the ingested source content.\n"
+            "   - NEVER ground an item in an example question, NEVER use an example's facts or answers as question content, and NEVER cite an example question as the grounding quote or citation anchor. Grounding comes only from the ingested source content.\n\n"
+            "6. SOURCE REFERENCE IN EVERY ITEM:\n"
+            "   - Every chunk in the source content is tagged with its source file (SOURCE: <filename>) and an anchor (page number, line range, timestamp, or section).\n"
+            "   - For EVERY item, the citation MUST name the exact source file from that chunk's SOURCE tag (citation.source_file) and the exact anchor (citation.location_type and citation.location_value, e.g. page \"Page 12\", line \"Lines 41-80\", timestamp \"04:32 - 05:10\"). The verbatim_grounding_quote must be an exact snippet from that same chunk.\n"
+            "   - The pedagogical_feedback for EVERY item must also name that source file and location, e.g. \"See chapter3.pdf, p. 12\", so a student can find where the correct answer comes from without any other information.\n"
         )
 
     def generate_questions(
@@ -89,7 +93,8 @@ class QuestionGeneratorEngine:
             f"Generate {count} assessment items following these specifications:\n"
             f"- Item Typology: {target_typology}\n"
             f"- Question Format: {question_type}\n"
-            f"- Cognitive Level: Bloom's Level 3 (Apply) or Level 4 (Analyze)\n\n"
+            f"- Cognitive Level: Bloom's Level 3 (Apply) or Level 4 (Analyze)\n"
+            f"- Source Reference: every item's citation.source_file and citation location must match the SOURCE tag and anchor of the chunk the answer comes from; the pedagogical_feedback must name that same file and location.\n\n"
             f"ADDITIONAL DIRECTIVES:\n"
             f"{custom_style_instructions or 'Adhere to strict psychometric guidelines.'}\n"
         )

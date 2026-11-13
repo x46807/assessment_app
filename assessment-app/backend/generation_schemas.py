@@ -12,7 +12,8 @@ class QuestionOption(BaseModel):
 
 class ItemCitation(BaseModel):
     source_title: str
-    location_type: Literal["page", "timestamp", "section"]
+    source_file: Optional[str] = None
+    location_type: Literal["page", "timestamp", "section", "line"]
     location_value: str
     verbatim_grounding_quote: str
 

@@ -37,7 +37,8 @@ class MediaParser:
                     chunk_index=chunk_idx,
                     locator_type="timestamp",
                     locator_value=f"{cls._format_timestamp(start_time)} - {cls._format_timestamp(end_time)}",
-                    content=" ".join(current_text)
+                    content=" ".join(current_text),
+                    source_file=title or f"YouTube Video ({video_id})",
                 ))
                 current_text = []
                 start_time = None
@@ -48,7 +49,8 @@ class MediaParser:
                 chunk_index=chunk_idx,
                 locator_type="timestamp",
                 locator_value=f"{cls._format_timestamp(start_time or 0)} - {cls._format_timestamp(end_time or 0)}",
-                content=" ".join(current_text)
+                content=" ".join(current_text),
+                source_file=title or f"YouTube Video ({video_id})",
             ))
 
         return IngestionResult(source_title=title or f"YouTube Video ({video_id})", source_type="youtube", total_chunks=len(chunks), chunks=chunks)
