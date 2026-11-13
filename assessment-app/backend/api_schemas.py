@@ -26,6 +26,18 @@ class TopicBucketResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class SourceResponse(BaseModel):
+    id: UUID
+    title: str
+    source_type: str
+    purpose: str = "source"
+    source_url: Optional[str] = None
+    chunks: int = 0
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
 class GenerateRequest(BaseModel):
     count: int = 5
     target_typology: Optional[str] = "SCENARIO_VIGNETTE"

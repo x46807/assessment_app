@@ -37,6 +37,9 @@ class TopicSource(Base):
     bucket_id = Column(UUID(as_uuid=True), ForeignKey("topic_buckets.id", ondelete="CASCADE"), nullable=False)
     source_type = Column(String(50), nullable=False)
     title = Column(String(255), nullable=False)
+    # "source": content questions are generated from.
+    # "example": sample questions used as style examples only.
+    purpose = Column(String(20), nullable=False, default="source", server_default="source")
     source_url = Column(Text, nullable=True)
     extracted_content = Column(JSONB, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
