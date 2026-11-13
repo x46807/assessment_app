@@ -95,7 +95,7 @@ class QuestionGeneratorEngine:
         )
 
         response = self.client.models.generate_content(
-            model="gemini-2.5-pro",
+            model="gemini-3.1-pro-preview",  # was gemini-2.5-pro, retired 2026-11-02
             contents=task_prompt,
             config=types.GenerateContentConfig(
                 system_instruction=self._build_system_instruction(),

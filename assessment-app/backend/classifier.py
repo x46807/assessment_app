@@ -31,7 +31,7 @@ class SampleClassifier:
             + raw_sample_text
         )
         response = self.client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",  # was gemini-2.5-flash, retired 2026-11-02
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",

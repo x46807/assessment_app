@@ -24,7 +24,7 @@ class StimulusOrchestrator:
             f"SOURCE:\n{source_text[:2500]}\n"
         )
         response = self.client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",  # was gemini-2.5-flash, retired 2026-11-02
             contents=plan_prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=gemini_response_schema(StimulusPlan), temperature=0.3)
         )
