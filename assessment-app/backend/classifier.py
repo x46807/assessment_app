@@ -4,7 +4,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 from typing import List, Literal
 
-from gemini_schema import gemini_response_schema
+from gemini_schema import gemini_response_schema, make_gemini_client
 
 class ClassifiedSample(BaseModel):
     detected_typology: Literal[
@@ -21,7 +21,7 @@ class ClassifiedSample(BaseModel):
 
 class SampleClassifier:
     def __init__(self, api_key: str = None):
-        self.client = genai.Client(api_key=api_key or os.environ.get("GEMINI_API_KEY"))
+        self.client = make_gemini_client(api_key)
 
     def analyze_samples(self, raw_sample_text: str) -> ClassifiedSample:
         prompt = (

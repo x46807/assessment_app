@@ -6,7 +6,7 @@ from google.genai import types
 from stimulus.wikimedia import WikimediaProvider
 from stimulus.diagrams import DiagramProvider
 from generation_schemas import StimulusContext
-from gemini_schema import gemini_response_schema
+from gemini_schema import gemini_response_schema, make_gemini_client
 
 class StimulusPlan(BaseModel):
     stimulus_modality: Literal["map_or_illustration", "primary_source_text", "diagram_flowchart", "data_table"]
@@ -16,7 +16,7 @@ class StimulusPlan(BaseModel):
 
 class StimulusOrchestrator:
     def __init__(self, api_key: Optional[str] = None):
-        self.client = genai.Client(api_key=api_key or os.environ.get("GEMINI_API_KEY"))
+        self.client = make_gemini_client(api_key)
 
     def plan_and_fetch_stimulus(self, source_text: str, preferred_modality: Optional[str] = None) -> StimulusContext:
         plan_prompt = (
