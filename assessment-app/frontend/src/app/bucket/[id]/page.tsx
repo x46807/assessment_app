@@ -188,7 +188,12 @@ export default function BucketWorkspace() {
       setItems((prev) => [...newItems, ...prev]);
       setActiveTab("practice");
     } catch (err: any) {
-      setGenerateError(err?.message || "Generation failed");
+      const message = err?.message || "Generation failed";
+      setGenerateError(
+        message.includes("Failed to fetch")
+          ? "The request did not reach the server or timed out. The backend may have been restarting for a deploy, or generation took longer than the connection allows. Please wait a moment and try again."
+          : message
+      );
     } finally {
       setGenerating(false);
     }
@@ -362,7 +367,11 @@ export default function BucketWorkspace() {
             <div className="flex justify-between items-center mb-4">
               <div>
                 <h3 className="font-bold text-slate-900 flex items-center space-x-2"><Sparkles className="h-5 w-5 text-indigo-600" /><span>Generate Practice Items</span></h3>
-                <p className="text-xs text-slate-600">Tests Bloom&apos;s Level 3/4 grounded strictly in this bucket&apos;s source material. Example questions are style examples and are not used as content.</p>
+                <p className="text-xs text-slate-600">Tests Bloom&apos;s Level 3/4, grounded strictly in this bucket&apos;s source material. When this topic has example questions, their style and question type drive what gets generated; the typology picker below is the fallback when there are none.</p>
+              {exampleCount > 0 && (
+                <p className="text-xs text-amber-700 mt-1">Using the style of {exampleCount} example question file{exampleCount === 1 ? "" : "s"} in this topic.</p>
+              )}
+              <p className="text-xs text-slate-500 mt-1">Generation can take a minute or two &mdash; please keep this tab open while it runs.</p>
               </div>
               <button onClick={handleGenerate} disabled={generating} className="px-5 py-2.5 bg-indigo-600 text-white font-semibold text-sm rounded-xl flex items-center space-x-2 disabled:opacity-60">
                 {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}

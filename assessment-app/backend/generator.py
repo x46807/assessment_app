@@ -27,7 +27,10 @@ class QuestionGeneratorEngine:
             "   - Homogeneity: All options must be syntactically parallel and roughly equal in length.\n"
             "   - NEVER use: 'All of the above', 'None of the above', 'Both A and B'.\n\n"
             "4. CITATION PRECISION:\n"
-            "   - Extract the exact anchor (Page number, Section name, or Timestamp interval).\n"
+            "   - Extract the exact anchor (Page number, Section name, or Timestamp interval).\n\n"
+            "5. STYLE EXAMPLES ARE NOT CONTENT:\n"
+            "   - When example questions are supplied, they define the FORMAT, STRUCTURE, PHRASING, and COGNITIVE LEVEL to imitate. They are the primary style reference.\n"
+            "   - NEVER ground an item in an example question, NEVER use an example's facts or answers as question content, and NEVER cite an example question as the grounding quote or citation anchor. Grounding comes only from the ingested source content.\n"
         )
 
     def generate_questions(
@@ -38,7 +41,8 @@ class QuestionGeneratorEngine:
         question_type: str = "multiple_choice",
         custom_style_instructions: Optional[str] = None,
         inject_external_stimulus: bool = False,
-        preferred_stimulus_modality: Optional[str] = None
+        preferred_stimulus_modality: Optional[str] = None,
+        style_examples: Optional[str] = None
     ) -> List[PsychometricItem]:
         source_context_str = ingested_source.to_llm_context()
         external_stimulus = None
@@ -52,6 +56,16 @@ class QuestionGeneratorEngine:
             except Exception as e:
                 print(f"[Stimulus Pipeline Warning]: {e}")
                 external_stimulus = None
+
+        style_examples_section = ""
+        if style_examples:
+            style_examples_section = (
+                "\n=== EXAMPLE QUESTIONS - STYLE REFERENCE ONLY ===\n"
+                "The questions below are real example questions from this topic. They are the PRIMARY basis for the style of the items you generate: imitate their format, structure, phrasing, option style, and cognitive level as closely as possible.\n"
+                "They are NOT source content: do not test their facts, do not reuse their answers, and never cite them as grounding. Every item you generate must still be grounded exclusively in the INGESTED SOURCE CONTENT above.\n\n"
+                f"{style_examples}\n"
+                "=== END EXAMPLE QUESTIONS ===\n"
+            )
 
         stimulus_prompt_section = ""
         if external_stimulus:
@@ -68,6 +82,7 @@ class QuestionGeneratorEngine:
             f"--- INGESTED SOURCE CONTENT (WITH CITATION ANCHORS) ---\n"
             f"{source_context_str}\n"
             f"--- END SOURCE CONTENT ---\n\n"
+            f"{style_examples_section}\n"
             f"{stimulus_prompt_section}\n"
             f"TASK:\n"
             f"Generate {count} assessment items following these specifications:\n"
