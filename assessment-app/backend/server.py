@@ -79,12 +79,12 @@ def build_example_style(example_sources):
             "STYLE REFERENCE - analysed from this topic's example questions "
             "(these examples are the PRIMARY basis for what to generate):" + chr(10)
             + "- Detected question typology: " + str(classified.detected_typology) + chr(10)
-            + "- Bloom's level: " + str(classified.bloom_level) + chr(10)
+            + "- Bloom's level: " + str(classified.detected_bloom_level) + chr(10)
             + "- Structural features: " + features + chr(10)
             + "- Guidance: " + str(classified.recommended_prompt_guidance)
         )
         print("[ExampleStyle] Analysed %d example file(s): typology=%s bloom=%s"
-              % (len(example_sources), classified.detected_typology, classified.bloom_level))
+              % (len(example_sources), classified.detected_typology, classified.detected_bloom_level))
     except Exception as e:
         print("[ExampleStyle] Classifier failed, using raw example text as style reference: %s" % e)
         style_guidance = (
@@ -368,16 +368,20 @@ def generate_bucket_test(
                               if style_instructions else req.custom_style_instructions)
     print("[Generate] effective_typology=%s style_examples=%s" % (effective_typology, "yes" if style_examples else "no"))
     style_started = time.monotonic()
-    items = generator_engine.generate_questions(
-        ingested_source=composite_source,
-        count=req.count,
-        target_typology=effective_typology,
-        question_type=req.question_type,
-        inject_external_stimulus=req.inject_external_stimulus,
-        preferred_stimulus_modality=req.preferred_stimulus_modality,
-        custom_style_instructions=style_instructions,
-        style_examples=style_examples,
-    )
+    try:
+        items = generator_engine.generate_questions(
+            ingested_source=composite_source,
+            count=req.count,
+            target_typology=effective_typology,
+            question_type=req.question_type,
+            inject_external_stimulus=req.inject_external_stimulus,
+            preferred_stimulus_modality=req.preferred_stimulus_modality,
+            custom_style_instructions=style_instructions,
+            style_examples=style_examples,
+        )
+    except Exception as e:
+        print("[Generate] FAILED after %.1fs: %s: %s" % (time.monotonic() - generate_started, type(e).__name__, e))
+        raise HTTPException(status_code=502, detail="Question generation failed: %s" % str(e)[:500])
     print("[Generate] done in %.1fs total (style analysis %.1fs, model %.1fs)" % (time.monotonic() - generate_started, style_started - generate_started, time.monotonic() - style_started))
 
     for item in items:
