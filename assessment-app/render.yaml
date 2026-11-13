@@ -31,10 +31,7 @@ services:
     startCommand: npm start
     envVars:
       - key: NEXT_PUBLIC_API_URL
-        fromService:
-          type: web
-          name: assessment-backend
-          property: host
+        value: https://assessment-backend-2a4z.onrender.com
       - key: NEXT_PUBLIC_GOOGLE_CLIENT_ID
         sync: false
 
