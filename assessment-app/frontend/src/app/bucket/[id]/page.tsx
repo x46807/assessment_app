@@ -27,6 +27,13 @@ interface ReferenceSet {
   examples_count: number;
 }
 
+interface QuestionBank {
+  id: string;
+  title: string;
+  created_at: string;
+  question_count: number;
+}
+
 interface UploadResult {
   name: string;
   purpose: Purpose;
@@ -50,8 +57,14 @@ export default function BucketWorkspace() {
   const { apiFetch } = useAuth();
 
   const [activeTab, setActiveTab] = useState<"sources" | "practice">("sources");
-  const [items, setItems] = useState<any[]>([]);
-  const [loadingItems, setLoadingItems] = useState(false);
+  const [banks, setBanks] = useState<QuestionBank[]>([]);
+  const [loadingBanks, setLoadingBanks] = useState(false);
+  // The bank whose questions are open in the quiz view (null = banks list).
+  const [openBankId, setOpenBankId] = useState<string | null>(null);
+  const [bankItems, setBankItems] = useState<any[]>([]);
+  const [loadingBankItems, setLoadingBankItems] = useState(false);
+  // "new" = create a fresh bank on generate; otherwise a bank id to add to.
+  const [bankChoice, setBankChoice] = useState("new");
   const [sources, setSources] = useState<SourceItem[]>([]);
   const [loadingSources, setLoadingSources] = useState(false);
   const [urlInput, setUrlInput] = useState("");
@@ -76,6 +89,33 @@ export default function BucketWorkspace() {
   const [batchPurpose, setBatchPurpose] = useState<Purpose>("source");
   const [uploadResults, setUploadResults] = useState<UploadResult[]>([]);
 
+  const loadBanks = async (): Promise<QuestionBank[]> => {
+    setLoadingBanks(true);
+    try {
+      const data = await apiFetch(`/api/buckets/${id}/banks`);
+      setBanks(data);
+      return data as QuestionBank[];
+    } catch {
+      setBanks([]);
+      return [];
+    } finally {
+      setLoadingBanks(false);
+    }
+  };
+
+  const openBank = async (bankId: string) => {
+    setOpenBankId(bankId);
+    setLoadingBankItems(true);
+    try {
+      const data = await apiFetch(`/api/buckets/${id}/items?bank_id=${bankId}`);
+      setBankItems(data);
+    } catch {
+      setBankItems([]);
+    } finally {
+      setLoadingBankItems(false);
+    }
+  };
+
   const loadSources = async () => {
     setLoadingSources(true);
     try {
@@ -89,8 +129,7 @@ export default function BucketWorkspace() {
   };
 
   useEffect(() => {
-    setLoadingItems(true);
-    apiFetch(`/api/buckets/${id}/items`).then(setItems).finally(() => setLoadingItems(false));
+    loadBanks();
     loadSources();
     apiFetch("/api/reference-sets").then(setReferenceSets).catch(() => setReferenceSets([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -210,13 +249,18 @@ export default function BucketWorkspace() {
       } else if (styleChoice !== "topic") {
         body.reference_set_id = styleChoice;
       }
-      const newItems = await apiFetch(`/api/buckets/${id}/generate`, {
+      if (bankChoice !== "new") {
+        body.bank_id = bankChoice;
+      }
+      await apiFetch(`/api/buckets/${id}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      setItems((prev) => [...newItems, ...prev]);
+      const freshBanks = await loadBanks();
       setActiveTab("practice");
+      const targetId = bankChoice === "new" ? freshBanks[0]?.id : bankChoice;
+      if (targetId) openBank(targetId);
     } catch (err: any) {
       const message = err?.message || "Generation failed";
       setGenerateError(
@@ -230,6 +274,7 @@ export default function BucketWorkspace() {
   };
 
   const sourceCount = sources.filter((s) => s.purpose === "source").length;
+  const openBankObj = banks.find((b) => b.id === openBankId) || null;
   const exampleCount = sources.filter((s) => s.purpose === "example").length;
 
   return (
@@ -247,7 +292,7 @@ export default function BucketWorkspace() {
           className={`pb-4 text-sm font-semibold border-b-2 flex items-center space-x-2 ${activeTab === "practice" ? "border-indigo-600 text-indigo-600" : "border-transparent text-slate-500"}`}
         >
           <Play className="h-4 w-4" />
-          <span>Interactive Test Items ({items.length})</span>
+          <span>Question Banks ({banks.length})</span>
         </button>
       </div>
 
@@ -441,6 +486,15 @@ export default function BucketWorkspace() {
                 <label className="font-semibold block mb-1">Question Count</label>
                 <input type="number" min={1} max={10} value={questionCount} onChange={(e) => setQuestionCount(Number(e.target.value))} className="w-full p-2 border rounded-lg bg-white" />
               </div>
+              <div>
+                <label className="font-semibold block mb-1">Save to bank</label>
+                <select value={bankChoice} onChange={(e) => setBankChoice(e.target.value)} className="w-full p-2 border rounded-lg bg-white">
+                  <option value="new">New bank</option>
+                  {banks.map((b) => (
+                    <option key={b.id} value={b.id}>{b.title} — {new Date(b.created_at).toLocaleDateString()} ({b.question_count} question{b.question_count === 1 ? "" : "s"})</option>
+                  ))}
+                </select>
+              </div>
               <div className="flex items-center space-x-2 pt-5">
                 <input type="checkbox" id="stimulusToggle" checked={injectStimulus} onChange={(e) => setInjectStimulus(e.target.checked)} className="h-4 w-4 rounded text-indigo-600" />
                 <label htmlFor="stimulusToggle" className="font-medium">Fetch External Stimulus (Map / Quote)</label>
@@ -448,8 +502,40 @@ export default function BucketWorkspace() {
             </div>
           </div>
         </div>
+      ) : openBankObj ? (
+        <div>
+          <button onClick={() => setOpenBankId(null)} className="text-sm font-semibold text-indigo-600 hover:text-indigo-800 mb-4">&larr; Back to banks</button>
+          <div className="mb-6">
+            <h3 className="font-bold text-slate-900 text-lg">{openBankObj.title}</h3>
+            <p className="text-xs text-slate-500">{new Date(openBankObj.created_at).toLocaleString()} · {openBankObj.question_count} question{openBankObj.question_count === 1 ? "" : "s"}</p>
+          </div>
+          {loadingBankItems ? <div className="flex justify-center py-20"><Loader2 className="h-8 w-8 animate-spin text-indigo-600" /></div> : <InteractiveQuiz items={bankItems} />}
+        </div>
+      ) : loadingBanks ? (
+        <div className="flex justify-center py-20"><Loader2 className="h-8 w-8 animate-spin text-indigo-600" /></div>
+      ) : banks.length === 0 ? (
+        <p className="text-sm text-slate-500 py-10 text-center border-2 border-dashed border-slate-200 rounded-xl">No question banks yet. Generate items from the Sources tab and they will land in a bank here.</p>
       ) : (
-        loadingItems ? <div className="flex justify-center py-20"><Loader2 className="h-8 w-8 animate-spin text-indigo-600" /></div> : <InteractiveQuiz items={items} />
+        <div>
+          <div className="mb-4">
+            <h3 className="font-bold text-slate-900">Question Banks</h3>
+            <p className="text-xs text-slate-500">{banks.reduce((n, b) => n + b.question_count, 0)} questions across {banks.length} bank{banks.length === 1 ? "" : "s"}, newest first. Click a bank to answer its questions.</p>
+          </div>
+          <ul className="space-y-3">
+            {banks.map((b) => (
+              <li key={b.id}>
+                <button onClick={() => openBank(b.id)} className="w-full text-left bg-white border border-slate-200 rounded-xl px-5 py-4 hover:border-indigo-400 hover:shadow-sm transition-all flex items-center gap-3">
+                  <Play className="h-5 w-5 text-indigo-600 shrink-0" />
+                  <span className="flex-1 min-w-0">
+                    <span className="block font-semibold text-slate-900">{b.title}</span>
+                    <span className="block text-xs text-slate-500">{new Date(b.created_at).toLocaleString()} · {b.question_count} question{b.question_count === 1 ? "" : "s"}</span>
+                  </span>
+                  <span className="text-sm font-semibold text-indigo-600 shrink-0">Take quiz &rarr;</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from database import Base, engine, get_db
 import db_models
 from auth import verify_google_token, create_access_token, get_current_user
-from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse
+from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse, QuestionBankResponse
 from pipeline import MasterIngestionPipeline
 from generator import QuestionGeneratorEngine
 from classifier import SampleClassifier
@@ -30,6 +30,14 @@ try:
         _conn.execute(text("ALTER TABLE topic_sources ADD COLUMN IF NOT EXISTS purpose VARCHAR(20) NOT NULL DEFAULT 'source'"))
 except Exception as _e:  # noqa: BLE001 - startup must not fail on this
     print(f"[Startup] Could not ensure topic_sources.purpose column: {_e}")
+
+# Existing databases were created before generated questions gained a
+# `bank_id` column, and create_all() does not alter existing tables.
+try:
+    with engine.begin() as _conn:
+        _conn.execute(text("ALTER TABLE generated_questions ADD COLUMN IF NOT EXISTS bank_id UUID"))
+except Exception as _e:  # noqa: BLE001 - startup must not fail on this
+    print(f"[Startup] Could not ensure generated_questions.bank_id column: {_e}")
 
 
 def normalize_purpose(purpose):
@@ -521,6 +529,65 @@ def delete_reference_set(
     return {"status": "deleted"}
 
 
+def bank_to_response(db: Session, bank) -> QuestionBankResponse:
+    count = db.query(db_models.GeneratedQuestionItem).filter(
+        db_models.GeneratedQuestionItem.bank_id == bank.id
+    ).count()
+    return QuestionBankResponse(
+        id=bank.id,
+        title=bank.title,
+        created_at=bank.created_at,
+        question_count=count,
+    )
+
+
+def ensure_banks_backfilled(db: Session, bucket) -> None:
+    """Questions generated before banks existed have no bank. Give
+    them one the first time the banks are listed or a new generation
+    runs, so every question lives in a bank. The backfilled bank is
+    dated with the oldest item, so it sorts last (oldest first)."""
+    unbanked = db.query(db_models.GeneratedQuestionItem).filter(
+        db_models.GeneratedQuestionItem.bucket_id == bucket.id,
+        db_models.GeneratedQuestionItem.bank_id.is_(None),
+    ).order_by(db_models.GeneratedQuestionItem.created_at.asc()).all()
+    if not unbanked:
+        return
+    bank_number = db.query(db_models.QuestionBank).filter(
+        db_models.QuestionBank.bucket_id == bucket.id
+    ).count() + 1
+    bank = db_models.QuestionBank(
+        bucket_id=bucket.id,
+        user_id=bucket.user_id,
+        title="Bank %d" % bank_number,
+        created_at=unbanked[0].created_at,
+    )
+    db.add(bank)
+    db.flush()
+    for item in unbanked:
+        item.bank_id = bank.id
+    db.commit()
+    print("[Banks] backfilled %d unbanked item(s) into %s" % (len(unbanked), bank.title))
+
+
+@app.get("/api/buckets/{bucket_id}/banks", response_model=List[QuestionBankResponse])
+def list_banks(
+    bucket_id: UUID,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    bucket = db.query(db_models.TopicBucket).filter(
+        db_models.TopicBucket.id == bucket_id,
+        db_models.TopicBucket.user_id == current_user.id
+    ).first()
+    if not bucket:
+        raise HTTPException(status_code=404, detail="Topic bucket not found.")
+    ensure_banks_backfilled(db, bucket)
+    banks = db.query(db_models.QuestionBank).filter(
+        db_models.QuestionBank.bucket_id == bucket.id
+    ).order_by(db_models.QuestionBank.created_at.desc()).all()
+    return [bank_to_response(db, bank) for bank in banks]
+
+
 @app.post("/api/buckets/{bucket_id}/generate")
 def generate_bucket_test(
     bucket_id: UUID,
@@ -614,9 +681,35 @@ def generate_bucket_test(
         raise HTTPException(status_code=502, detail="Question generation failed: %s" % str(e)[:500])
     print("[Generate] done in %.1fs total (style analysis %.1fs, model %.1fs)" % (time.monotonic() - generate_started, style_started - generate_started, time.monotonic() - style_started))
 
+    # Question banks: every generation lands in a bank -- a new one
+    # by default, or an existing one the request names to add to.
+    ensure_banks_backfilled(db, bucket)
+    target_bank = None
+    if req.bank_id:
+        target_bank = db.query(db_models.QuestionBank).filter(
+            db_models.QuestionBank.id == req.bank_id,
+            db_models.QuestionBank.bucket_id == bucket.id,
+            db_models.QuestionBank.user_id == current_user.id,
+        ).first()
+        if not target_bank:
+            raise HTTPException(status_code=404, detail="Question bank not found.")
+    else:
+        bank_number = db.query(db_models.QuestionBank).filter(
+            db_models.QuestionBank.bucket_id == bucket.id
+        ).count() + 1
+        target_bank = db_models.QuestionBank(
+            bucket_id=bucket.id,
+            user_id=current_user.id,
+            title="Bank %d" % bank_number,
+        )
+        db.add(target_bank)
+        db.flush()  # assign the id before the items reference it
+    print("[Generate] bank=%s (%s)" % (target_bank.title, target_bank.id))
+
     for item in items:
         rec = db_models.GeneratedQuestionItem(
             bucket_id=bucket.id,
+            bank_id=target_bank.id,
             catalog_typology=item.catalog_typology,
             bloom_level=item.bloom_level,
             question_type=item.question_type,
@@ -635,6 +728,7 @@ def generate_bucket_test(
 @app.get("/api/buckets/{bucket_id}/items")
 def get_bucket_items(
     bucket_id: UUID,
+    bank_id: Optional[UUID] = None,
     current_user: db_models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -644,4 +738,9 @@ def get_bucket_items(
     ).first()
     if not bucket:
         raise HTTPException(status_code=404, detail="Topic bucket not found.")
-    return bucket.generated_items
+    query = db.query(db_models.GeneratedQuestionItem).filter(
+        db_models.GeneratedQuestionItem.bucket_id == bucket.id
+    )
+    if bank_id:
+        query = query.filter(db_models.GeneratedQuestionItem.bank_id == bank_id)
+    return query.order_by(db_models.GeneratedQuestionItem.created_at.asc()).all()

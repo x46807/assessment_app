@@ -43,6 +43,13 @@ class ReferenceSetCreate(BaseModel):
     title: str
     description: Optional[str] = None
 
+class QuestionBankResponse(BaseModel):
+    id: UUID
+    title: str
+    created_at: datetime
+    question_count: int = 0
+
+
 class ReferenceSetResponse(BaseModel):
     id: UUID
     title: str
@@ -77,3 +84,6 @@ class GenerateRequest(BaseModel):
     # When False, ignore the topic's own example questions and use
     # only the typology picker (ignored when reference_set_id is set).
     use_topic_examples: bool = True
+    # Add the new questions to this existing bank instead of creating
+    # a new one. Must belong to the same topic; omitted = new bank.
+    bank_id: Optional[UUID] = None

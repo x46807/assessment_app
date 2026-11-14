@@ -30,6 +30,7 @@ class TopicBucket(Base):
     user = relationship("User", back_populates="buckets")
     sources = relationship("TopicSource", back_populates="bucket", cascade="all, delete-orphan")
     generated_items = relationship("GeneratedQuestionItem", back_populates="bucket", cascade="all, delete-orphan")
+    banks = relationship("QuestionBank", back_populates="bucket", cascade="all, delete-orphan")
 
 class TopicSource(Base):
     __tablename__ = "topic_sources"
@@ -78,11 +79,30 @@ class ReferenceExample(Base):
 
     reference_set = relationship("ReferenceSet", back_populates="examples")
 
+class QuestionBank(Base):
+    """A bank of generated questions inside one topic. Every
+    generation lands in a bank -- a new one by default, or an
+    existing one the user picks -- so questions accumulate into
+    uniquely labelled, date-sorted sets the user can open and
+    answer one at a time."""
+    __tablename__ = "question_banks"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    bucket_id = Column(UUID(as_uuid=True), ForeignKey("topic_buckets.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    title = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    bucket = relationship("TopicBucket", back_populates="banks")
+    items = relationship("GeneratedQuestionItem", back_populates="bank")
+
+
 class GeneratedQuestionItem(Base):
     __tablename__ = "generated_questions"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     bucket_id = Column(UUID(as_uuid=True), ForeignKey("topic_buckets.id", ondelete="CASCADE"), nullable=False)
+    bank_id = Column(UUID(as_uuid=True), ForeignKey("question_banks.id", ondelete="SET NULL"), nullable=True)
     catalog_typology = Column(String(100), nullable=False)
     bloom_level = Column(String(50), nullable=False)
     question_type = Column(String(50), nullable=False)
@@ -96,3 +116,4 @@ class GeneratedQuestionItem(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     bucket = relationship("TopicBucket", back_populates="generated_items")
+    bank = relationship("QuestionBank", back_populates="items")
