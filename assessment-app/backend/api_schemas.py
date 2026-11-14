@@ -50,6 +50,10 @@ class QuestionBankResponse(BaseModel):
     question_count: int = 0
 
 
+class QuestionBankRename(BaseModel):
+    title: str
+
+
 class ReferenceSetResponse(BaseModel):
     id: UUID
     title: str

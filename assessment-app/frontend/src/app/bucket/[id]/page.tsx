@@ -4,7 +4,7 @@ import React, { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import InteractiveQuiz from "@/components/InteractiveQuiz";
-import { UploadCloud, Link as LinkIcon, Sparkles, Loader2, Play, FileText, CheckCircle2, XCircle, X } from "lucide-react";
+import { UploadCloud, Link as LinkIcon, Sparkles, Loader2, Play, FileText, CheckCircle2, XCircle, X, Pencil, Trash2 } from "lucide-react";
 
 type Purpose = "source" | "example";
 
@@ -65,6 +65,10 @@ export default function BucketWorkspace() {
   const [loadingBankItems, setLoadingBankItems] = useState(false);
   // "new" = create a fresh bank on generate; otherwise a bank id to add to.
   const [bankChoice, setBankChoice] = useState("new");
+  // Inline rename: which bank is being renamed, and the draft title.
+  const [renamingBankId, setRenamingBankId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [bankActionError, setBankActionError] = useState("");
   const [sources, setSources] = useState<SourceItem[]>([]);
   const [loadingSources, setLoadingSources] = useState(false);
   const [urlInput, setUrlInput] = useState("");
@@ -113,6 +117,40 @@ export default function BucketWorkspace() {
       setBankItems([]);
     } finally {
       setLoadingBankItems(false);
+    }
+  };
+
+  const saveRename = async (bankId: string) => {
+    const title = renameValue.trim();
+    if (!title) return;
+    setBankActionError("");
+    try {
+      const updated = await apiFetch(`/api/banks/${bankId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      setBanks((prev) => prev.map((b) => (b.id === bankId ? updated : b)));
+      setRenamingBankId(null);
+    } catch (err: any) {
+      // Keep the editor open so the draft title is not lost.
+      setBankActionError(err?.message || "Rename failed");
+    }
+  };
+
+  const handleDeleteBank = async (bank: QuestionBank) => {
+    if (!window.confirm(`Delete ${bank.title} and all ${bank.question_count} of its questions?`)) return;
+    setBankActionError("");
+    try {
+      await apiFetch(`/api/banks/${bank.id}`, { method: "DELETE" });
+      setBanks((prev) => prev.filter((b) => b.id !== bank.id));
+      if (openBankId === bank.id) {
+        setOpenBankId(null);
+        setBankItems([]);
+      }
+      if (bankChoice === bank.id) setBankChoice("new");
+    } catch (err: any) {
+      setBankActionError(err?.message || "Delete failed");
     }
   };
 
@@ -521,17 +559,43 @@ export default function BucketWorkspace() {
             <h3 className="font-bold text-slate-900">Question Banks</h3>
             <p className="text-xs text-slate-500">{banks.reduce((n, b) => n + b.question_count, 0)} questions across {banks.length} bank{banks.length === 1 ? "" : "s"}, newest first. Click a bank to answer its questions.</p>
           </div>
+          {bankActionError && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-4">{bankActionError}</p>}
           <ul className="space-y-3">
             {banks.map((b) => (
-              <li key={b.id}>
-                <button onClick={() => openBank(b.id)} className="w-full text-left bg-white border border-slate-200 rounded-xl px-5 py-4 hover:border-indigo-400 hover:shadow-sm transition-all flex items-center gap-3">
-                  <Play className="h-5 w-5 text-indigo-600 shrink-0" />
-                  <span className="flex-1 min-w-0">
-                    <span className="block font-semibold text-slate-900">{b.title}</span>
-                    <span className="block text-xs text-slate-500">{new Date(b.created_at).toLocaleString()} · {b.question_count} question{b.question_count === 1 ? "" : "s"}</span>
+              <li key={b.id} className="bg-white border border-slate-200 rounded-xl px-5 py-4 flex items-center gap-3">
+                {renamingBankId === b.id ? (
+                  <span className="flex-1 min-w-0 flex items-center gap-2">
+                    <input
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") saveRename(b.id); if (e.key === "Escape") setRenamingBankId(null); }}
+                      autoFocus
+                      aria-label="Bank title"
+                      className="flex-1 min-w-0 px-2 py-1 text-sm font-medium border rounded-lg"
+                    />
+                    <button onClick={() => saveRename(b.id)} className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 shrink-0">Save</button>
+                    <button onClick={() => setRenamingBankId(null)} className="text-xs font-semibold text-slate-500 hover:text-slate-700 shrink-0">Cancel</button>
                   </span>
-                  <span className="text-sm font-semibold text-indigo-600 shrink-0">Take quiz &rarr;</span>
-                </button>
+                ) : (
+                  <button onClick={() => openBank(b.id)} className="flex-1 min-w-0 text-left flex items-center gap-3 hover:opacity-80">
+                    <Play className="h-5 w-5 text-indigo-600 shrink-0" />
+                    <span className="flex-1 min-w-0">
+                      <span className="block truncate font-semibold text-slate-900">{b.title}</span>
+                      <span className="block text-xs text-slate-500">{new Date(b.created_at).toLocaleString()} · {b.question_count} question{b.question_count === 1 ? "" : "s"}</span>
+                    </span>
+                    <span className="text-sm font-semibold text-indigo-600 shrink-0">Take quiz &rarr;</span>
+                  </button>
+                )}
+                {renamingBankId !== b.id && (
+                  <span className="flex items-center gap-1 shrink-0">
+                    <button onClick={() => { setRenamingBankId(b.id); setRenameValue(b.title); }} aria-label={`Rename ${b.title}`} title="Rename bank" className="p-1.5 text-slate-400 hover:text-indigo-600 rounded-lg">
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                    <button onClick={() => handleDeleteBank(b)} aria-label={`Delete ${b.title}`} title="Delete bank" className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg">
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </span>
+                )}
               </li>
             ))}
           </ul>

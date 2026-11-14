@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from database import Base, engine, get_db
 import db_models
 from auth import verify_google_token, create_access_token, get_current_user
-from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse, QuestionBankResponse
+from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse, QuestionBankResponse, QuestionBankRename
 from pipeline import MasterIngestionPipeline
 from generator import QuestionGeneratorEngine
 from classifier import SampleClassifier
@@ -586,6 +586,48 @@ def list_banks(
         db_models.QuestionBank.bucket_id == bucket.id
     ).order_by(db_models.QuestionBank.created_at.desc()).all()
     return [bank_to_response(db, bank) for bank in banks]
+
+
+@app.patch("/api/banks/{bank_id}", response_model=QuestionBankResponse)
+def rename_bank(
+    bank_id: UUID,
+    req: QuestionBankRename,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    bank = db.query(db_models.QuestionBank).filter(
+        db_models.QuestionBank.id == bank_id,
+        db_models.QuestionBank.user_id == current_user.id
+    ).first()
+    if not bank:
+        raise HTTPException(status_code=404, detail="Question bank not found.")
+    title = (req.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="A bank needs a non-empty title.")
+    if len(title) > 255:
+        raise HTTPException(status_code=400, detail="Title must be 255 characters or fewer.")
+    bank.title = title
+    db.commit()
+    return bank_to_response(db, bank)
+
+
+@app.delete("/api/banks/{bank_id}")
+def delete_bank(
+    bank_id: UUID,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    bank = db.query(db_models.QuestionBank).filter(
+        db_models.QuestionBank.id == bank_id,
+        db_models.QuestionBank.user_id == current_user.id
+    ).first()
+    if not bank:
+        raise HTTPException(status_code=404, detail="Question bank not found.")
+    # The items relationship cascades, so the bank's questions go
+    # with it -- a deleted bank must not resurrect via the backfill.
+    db.delete(bank)
+    db.commit()
+    return {"status": "deleted"}
 
 
 @app.post("/api/buckets/{bucket_id}/generate")

@@ -94,7 +94,10 @@ class QuestionBank(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     bucket = relationship("TopicBucket", back_populates="banks")
-    items = relationship("GeneratedQuestionItem", back_populates="bank")
+    # Deleting a bank deletes its questions: a bank is the set, and
+    # orphaned questions would otherwise be scooped back into a new
+    # bank by the backfill the next time banks are listed.
+    items = relationship("GeneratedQuestionItem", back_populates="bank", cascade="all, delete-orphan")
 
 
 class GeneratedQuestionItem(Base):
