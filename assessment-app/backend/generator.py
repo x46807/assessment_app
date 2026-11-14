@@ -54,9 +54,17 @@ class QuestionGeneratorEngine:
 
         if inject_external_stimulus or target_typology in ["STIMULUS_INTERPRETATION", "DATA_EVALUATION"]:
             try:
+                style_context = None
+                if target_typology == "STIMULUS_INTERPRETATION":
+                    style_context = (
+                        "The generated items imitate stimulus-interpretation questions: each item is built "
+                        "around a stimulus the student must interpret -- in the example questions this is "
+                        "usually a map or illustration, not a passage of text."
+                    )
                 external_stimulus = self.stimulus_orchestrator.plan_and_fetch_stimulus(
                     source_text=source_context_str,
-                    preferred_modality=preferred_stimulus_modality
+                    preferred_modality=preferred_stimulus_modality,
+                    style_context=style_context
                 )
             except Exception as e:
                 print(f"[Stimulus Pipeline Warning]: {e}")
@@ -74,13 +82,23 @@ class QuestionGeneratorEngine:
 
         stimulus_prompt_section = ""
         if external_stimulus:
-            stimulus_prompt_section = (
-                f"\n=== EXTERNAL STIMULUS SUPPLIED FOR THIS ASSESSMENT ===\n"
-                f"Type: {external_stimulus.stimulus_type.upper()}\n"
-                f"Attribution / Background: {external_stimulus.attribution_or_context}\n\n"
-                f"CONTENT / DATA:\n{external_stimulus.content}\n"
-                f"======================================================\n"
-            )
+            if external_stimulus.stimulus_type in ("map", "illustration"):
+                stimulus_prompt_section = (
+                    f"\n=== EXTERNAL STIMULUS SUPPLIED FOR THIS ASSESSMENT ===\n"
+                    f"Type: {external_stimulus.stimulus_type.upper()} -- the image is attached to this request; look at it.\n"
+                    f"Attribution / Background: {external_stimulus.attribution_or_context}\n"
+                    f"Image URL: {external_stimulus.content}\n"
+                    f"Write the stem so the student must interpret what is actually shown in the image, as in the example questions.\n"
+                    f"======================================================\n"
+                )
+            else:
+                stimulus_prompt_section = (
+                    f"\n=== EXTERNAL STIMULUS SUPPLIED FOR THIS ASSESSMENT ===\n"
+                    f"Type: {external_stimulus.stimulus_type.upper()}\n"
+                    f"Attribution / Background: {external_stimulus.attribution_or_context}\n\n"
+                    f"CONTENT / DATA:\n{external_stimulus.content}\n"
+                    f"======================================================\n"
+                )
 
         task_prompt = (
             f"SOURCE DOCUMENT: \"{ingested_source.source_title}\" ({ingested_source.source_type.upper()})\n\n"
@@ -99,9 +117,20 @@ class QuestionGeneratorEngine:
             f"{custom_style_instructions or 'Adhere to strict psychometric guidelines.'}\n"
         )
 
+        contents = task_prompt
+        if external_stimulus and external_stimulus.stimulus_type in ("map", "illustration"):
+            # The model cannot see an image from a URL in the text prompt.
+            # Attach it as a multimodal part; if that fails, fall back
+            # to the text-only prompt rather than failing generation.
+            mime = "image/png" if external_stimulus.content.lower().split("?")[0].endswith(".png") else "image/jpeg"
+            try:
+                contents = [task_prompt, types.Part.from_uri(file_uri=external_stimulus.content, mime_type=mime)]
+            except Exception as e:
+                print(f"[Generate] could not attach stimulus image, text-only prompt: {e}")
+
         response = self.client.models.generate_content(
             model="gemini-3.1-pro-preview",  # was gemini-2.5-pro, retired 2026-11-02
-            contents=task_prompt,
+            contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=self._build_system_instruction(),
                 response_mime_type="application/json",
@@ -112,6 +141,14 @@ class QuestionGeneratorEngine:
 
         batch = GenerationBatchOutput.model_validate_json(response.text)
         for item in batch.items:
-            if external_stimulus and not item.stimulus:
+            if item.stimulus and item.stimulus.stimulus_type in ("map", "illustration"):
+                # A map/illustration stimulus is only real if it is the
+                # URL we fetched. The model may invent one; a broken
+                # image is worse than no image, so replace it with the
+                # verified stimulus, or drop it when there is none.
+                if not external_stimulus or item.stimulus.content != external_stimulus.content:
+                    print(f"[Generate] dropping model-invented visual stimulus: {str(item.stimulus.content)[:100]}")
+                    item.stimulus = external_stimulus
+            elif external_stimulus and not item.stimulus:
                 item.stimulus = external_stimulus
         return batch.items

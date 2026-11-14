@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import time
 from datetime import datetime
@@ -78,6 +79,13 @@ def build_example_style(example_sources, label=None):
     try:
         classified = SampleClassifier().analyze_samples(example_text[:8000])
         effective_typology = classified.detected_typology or None
+        if effective_typology != "STIMULUS_INTERPRETATION" and re.search(
+            r"\b(map|maps|illustration|illustrations)\b|based on the (image|diagram|chart)",
+            example_text, re.IGNORECASE,
+        ):
+            print("[ExampleStyle] examples mention a map/illustration; overriding typology %s -> STIMULUS_INTERPRETATION"
+                  % effective_typology)
+            effective_typology = "STIMULUS_INTERPRETATION"
         features = ", ".join(classified.structural_features) or "not specified"
         style_guidance = (
             "STYLE REFERENCE - analysed from " + (label or "the example questions in this topic") + " "
@@ -573,6 +581,10 @@ def generate_bucket_test(
         style_instructions = (style_instructions + chr(10) + req.custom_style_instructions
                               if style_instructions else req.custom_style_instructions)
     print("[Generate] effective_typology=%s style_examples=%s" % (effective_typology, "yes" if style_examples else "no"))
+    preferred_stimulus_modality = req.preferred_stimulus_modality
+    if effective_typology == "STIMULUS_INTERPRETATION" and not preferred_stimulus_modality:
+        preferred_stimulus_modality = "map_or_illustration"
+        print("[Generate] stimulus style is visual; preferring a map/illustration stimulus")
     style_started = time.monotonic()
     try:
         items = generator_engine.generate_questions(
@@ -581,7 +593,7 @@ def generate_bucket_test(
             target_typology=effective_typology,
             question_type=req.question_type,
             inject_external_stimulus=req.inject_external_stimulus,
-            preferred_stimulus_modality=req.preferred_stimulus_modality,
+            preferred_stimulus_modality=preferred_stimulus_modality,
             custom_style_instructions=style_instructions,
             style_examples=style_examples,
         )

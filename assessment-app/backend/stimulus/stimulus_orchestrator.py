@@ -18,22 +18,42 @@ class StimulusOrchestrator:
     def __init__(self, api_key: Optional[str] = None):
         self.client = make_gemini_client(api_key)
 
-    def plan_and_fetch_stimulus(self, source_text: str, preferred_modality: Optional[str] = None) -> StimulusContext:
-        plan_prompt = (
-            "Plan an external stimulus (primary source text, map query, diagram, or data table) that pairs with this source text.\n\n"
-            f"SOURCE:\n{source_text[:2500]}\n"
-        )
+    def plan_and_fetch_stimulus(self, source_text: str, preferred_modality: Optional[str] = None, style_context: Optional[str] = None) -> StimulusContext:
+        # preferred_modality was previously accepted and then ignored,
+        # so a caller asking for a map got whatever the planner felt
+        # like -- usually a text passage. When it is set, the plan is
+        # constrained to that modality instead of choosing freely.
+        if preferred_modality == "map_or_illustration":
+            plan_prompt = (
+                "Plan a MAP OR ILLUSTRATION stimulus for this source text. "
+                "Give a Wikimedia Commons search query that will find a map, illustration, or image "
+                "depicting the people, places, or events in the source text.\n\n"
+                + (f"STYLE CONTEXT: {style_context}\n\n" if style_context else "")
+                + f"SOURCE:\n{source_text[:2500]}\n"
+            )
+        else:
+            plan_prompt = (
+                "Plan an external stimulus (primary source text, map query, diagram, or data table) that pairs with this source text.\n\n"
+                + (f"STYLE CONTEXT: {style_context}\n\n" if style_context else "")
+                + f"SOURCE:\n{source_text[:2500]}\n"
+            )
         response = self.client.models.generate_content(
             model="gemini-3.8-flash",  # was gemini-2.5-flash, retired 2026-11-02
             contents=plan_prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=gemini_response_schema(StimulusPlan), temperature=0.3)
         )
         plan = StimulusPlan.model_validate_json(response.text)
+        modality = preferred_modality or plan.stimulus_modality
+        print(f"[Stimulus] planned modality={plan.stimulus_modality} preferred={preferred_modality} query={plan.search_query_or_theme!r}")
 
-        if plan.stimulus_modality == "map_or_illustration":
-            media = WikimediaProvider.search_media(plan.search_query_or_theme)
+        if modality == "map_or_illustration":
+            query = plan.search_query_or_theme
+            if "map" not in query.lower() and "illustration" not in query.lower():
+                query = query + " map"
+            media = WikimediaProvider.search_media(query)
             if media:
                 return StimulusContext(stimulus_type="map", content=media["media_url"], attribution_or_context=media["attribution"])
+            print(f"[Stimulus] Wikimedia found no image for {query!r}; falling back to a text passage")
 
         if plan.stimulus_modality == "diagram_flowchart":
             diagram = DiagramProvider.format_mermaid_diagram(plan.synthetic_content_draft or "graph TD; A-->B;", plan.search_query_or_theme)
