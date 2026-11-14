@@ -132,10 +132,13 @@ def get_bucket_or_404(db, bucket_id, user_id):
 
 def source_to_response(source):
     chunks = 0
+    images = 0
     try:
         chunks = int((source.extracted_content or {}).get("total_chunks", 0))
+        images = len((source.extracted_content or {}).get("images", []) or [])
     except Exception:  # noqa: BLE001 - malformed stored content must not break listing
         chunks = 0
+        images = 0
     return SourceResponse(
         id=source.id,
         title=source.title,
@@ -143,6 +146,7 @@ def source_to_response(source):
         purpose=getattr(source, "purpose", None) or "source",
         source_url=source.source_url,
         chunks=chunks,
+        images=images,
         created_at=source.created_at,
     )
 
@@ -558,9 +562,16 @@ def generate_bucket_test(
         )
 
     all_chunks = []
+    all_images = []
     for src in content_sources:
         src_data = IngestionResult.model_validate(src.extracted_content)
         all_chunks.extend(fill_chunk_source_files(src_data.chunks, src.title))
+        # Images embedded in the source PDFs travel with the chunks;
+        # older uploads have none (images=[] by default).
+        for img in (src_data.images or []):
+            all_images.append(img.model_dump())
+    if all_images:
+        print("[Generate] %d embedded source image(s) available as stimulus" % len(all_images))
 
     composite_source = IngestionResult(
         source_title=bucket.title,
@@ -596,6 +607,7 @@ def generate_bucket_test(
             preferred_stimulus_modality=preferred_stimulus_modality,
             custom_style_instructions=style_instructions,
             style_examples=style_examples,
+            source_images=all_images,
         )
     except Exception as e:
         print("[Generate] FAILED after %.1fs: %s: %s" % (time.monotonic() - generate_started, type(e).__name__, e))

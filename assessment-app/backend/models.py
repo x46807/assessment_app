@@ -9,11 +9,27 @@ class SourceChunk(BaseModel):
     source_file: Optional[str] = Field(default=None, description="Unique identifier of the source this chunk came from, e.g. the uploaded filename")
     raw_metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
+class SourceImage(BaseModel):
+    """An image embedded in a source document, extracted for use as a
+    visual stimulus. The image bytes travel as a data URI because
+    Render's free tier has no persistent disk to serve files from,
+    and the frontend renders a data URI in an <img> directly.
+    Kept out of the text chunks so to_llm_context() stays text-only."""
+    image_id: str
+    page: int
+    source_file: Optional[str] = None
+    mime_type: str = "image/jpeg"
+    data_uri: str
+    width: int
+    height: int
+
+
 class IngestionResult(BaseModel):
     source_title: str
     source_type: Literal["pdf", "docx", "text", "web", "youtube", "audio_video", "gdoc", "image"]
     total_chunks: int
     chunks: List[SourceChunk]
+    images: List[SourceImage] = Field(default_factory=list)
 
     def to_llm_context(self) -> str:
         formatted_blocks = []

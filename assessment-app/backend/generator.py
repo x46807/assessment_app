@@ -8,6 +8,19 @@ from gemini_schema import gemini_response_schema, make_gemini_client
 from generation_schemas import GenerationBatchOutput, PsychometricItem
 from stimulus.stimulus_orchestrator import StimulusOrchestrator
 
+
+def _image_part(content: str):
+    """Build a Gemini image Part for a stimulus: a data URI (source
+    material's own embedded image) becomes inline bytes, a web URL
+    becomes a file reference the API fetches itself."""
+    import base64
+    if content.startswith("data:"):
+        header, b64 = content.split(",", 1)
+        mime = header.split(";")[0].split(":", 1)[1] or "image/jpeg"
+        return types.Part.from_bytes(data=base64.b64decode(b64), mime_type=mime)
+    mime = "image/png" if content.lower().split("?")[0].endswith(".png") else "image/jpeg"
+    return types.Part.from_uri(file_uri=content, mime_type=mime)
+
 class QuestionGeneratorEngine:
     def __init__(self, api_key: str = None):
         self.client = make_gemini_client(api_key)
@@ -47,7 +60,8 @@ class QuestionGeneratorEngine:
         custom_style_instructions: Optional[str] = None,
         inject_external_stimulus: bool = False,
         preferred_stimulus_modality: Optional[str] = None,
-        style_examples: Optional[str] = None
+        style_examples: Optional[str] = None,
+        source_images: Optional[list] = None
     ) -> List[PsychometricItem]:
         source_context_str = ingested_source.to_llm_context()
         external_stimulus = None
@@ -64,7 +78,8 @@ class QuestionGeneratorEngine:
                 external_stimulus = self.stimulus_orchestrator.plan_and_fetch_stimulus(
                     source_text=source_context_str,
                     preferred_modality=preferred_stimulus_modality,
-                    style_context=style_context
+                    style_context=style_context,
+                    source_images=source_images
                 )
             except Exception as e:
                 print(f"[Stimulus Pipeline Warning]: {e}")
@@ -122,9 +137,8 @@ class QuestionGeneratorEngine:
             # The model cannot see an image from a URL in the text prompt.
             # Attach it as a multimodal part; if that fails, fall back
             # to the text-only prompt rather than failing generation.
-            mime = "image/png" if external_stimulus.content.lower().split("?")[0].endswith(".png") else "image/jpeg"
             try:
-                contents = [task_prompt, types.Part.from_uri(file_uri=external_stimulus.content, mime_type=mime)]
+                contents = [task_prompt, _image_part(external_stimulus.content)]
             except Exception as e:
                 print(f"[Generate] could not attach stimulus image, text-only prompt: {e}")
 

@@ -33,6 +33,7 @@ class SourceResponse(BaseModel):
     purpose: str = "source"
     source_url: Optional[str] = None
     chunks: int = 0
+    images: int = 0
     created_at: datetime
 
     class Config:

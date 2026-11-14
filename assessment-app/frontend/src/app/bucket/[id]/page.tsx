@@ -15,6 +15,7 @@ interface SourceItem {
   purpose: Purpose;
   source_url?: string | null;
   chunks: number;
+  images?: number;
   created_at: string;
 }
 
@@ -381,6 +382,7 @@ export default function BucketWorkspace() {
                       <span className="block truncate text-sm font-medium text-slate-800">{s.title}</span>
                       <span className="block text-xs text-slate-400">
                         {s.source_type} · {s.chunks} chunk{s.chunks === 1 ? "" : "s"}
+                        {(s.images ?? 0) > 0 ? ` · ${s.images} image${s.images === 1 ? "" : "s"} extracted` : ""}
                         {s.source_url ? ` · ${s.source_url}` : ""} · {new Date(s.created_at).toLocaleDateString()}
                       </span>
                     </span>

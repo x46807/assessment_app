@@ -1,7 +1,18 @@
+import base64
+import hashlib
+import io
 import fitz
 import docx
 from typing import List
-from models import SourceChunk, IngestionResult
+from models import SourceChunk, IngestionResult, SourceImage
+
+# Embedded-image extraction limits: keep the stored JSON small enough
+# that generation (which re-reads every source) stays fast, and skip
+# icons, logos and decorative thumbnails, which make poor stimuli.
+MAX_IMAGES_PER_PDF = 4
+MIN_IMAGE_DIMENSION = 200
+MAX_IMAGE_DIMENSION = 900
+IMAGE_JPEG_QUALITY = 75
 
 class DocumentParser:
     @staticmethod
@@ -22,8 +33,70 @@ class DocumentParser:
                 source_file=title,
                 raw_metadata={"page_number": page_num + 1}
             ))
+        images = DocumentParser._extract_pdf_images(doc, title)
         doc.close()
-        return IngestionResult(source_title=title, source_type="pdf", total_chunks=len(chunks), chunks=chunks)
+        if images:
+            print(f"[PDF] {title}: extracted {len(images)} embedded image(s) for stimulus use")
+        return IngestionResult(source_title=title, source_type="pdf", total_chunks=len(chunks), chunks=chunks, images=images)
+
+    @staticmethod
+    def _extract_pdf_images(doc, title: str) -> List[SourceImage]:
+        """Extract embedded images from a PDF as downscaled JPEG data URIs.
+
+        One bad image must never break ingestion, so every image is
+        handled defensively and skipped on any error. Duplicates (the
+        same image on several pages, or embedded twice) are dropped by
+        content hash, and only the largest few are kept.
+        """
+        from PIL import Image
+
+        candidates = []
+        seen_xrefs = set()
+        seen_hashes = set()
+        for page_num in range(len(doc)):
+            for img in doc[page_num].get_images(full=True):
+                xref = img[0]
+                if xref in seen_xrefs:
+                    continue
+                seen_xrefs.add(xref)
+                try:
+                    raw = doc.extract_image(xref)
+                    width, height = raw["width"], raw["height"]
+                    if width < MIN_IMAGE_DIMENSION or height < MIN_IMAGE_DIMENSION:
+                        continue
+                    digest = hashlib.sha256(raw["image"]).hexdigest()
+                    if digest in seen_hashes:
+                        continue
+                    seen_hashes.add(digest)
+                    pil = Image.open(io.BytesIO(raw["image"]))
+                    if pil.mode in ("RGBA", "LA", "PA"):
+                        background = Image.new("RGB", pil.size, (255, 255, 255))
+                        background.paste(pil, mask=pil.split()[-1])
+                        pil = background
+                    else:
+                        pil = pil.convert("RGB")
+                    pil.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.LANCZOS)
+                    buf = io.BytesIO()
+                    pil.save(buf, format="JPEG", quality=IMAGE_JPEG_QUALITY)
+                    data_uri = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+                    candidates.append(SourceImage(
+                        image_id=f"{title}-p{page_num + 1}-{xref}",
+                        page=page_num + 1,
+                        source_file=title,
+                        mime_type="image/jpeg",
+                        data_uri=data_uri,
+                        width=pil.width,
+                        height=pil.height,
+                    ))
+                except Exception as e:
+                    print(f"[PDF] skipping unreadable embedded image xref={xref} on p.{page_num + 1}: {e}")
+                    continue
+        # Keep the largest images: maps and full-page illustrations
+        # carry the most stimulus value; icons were already filtered.
+        candidates.sort(key=lambda im: im.width * im.height, reverse=True)
+        kept = candidates[:MAX_IMAGES_PER_PDF]
+        kept.sort(key=lambda im: (im.page, im.image_id))
+        return kept
 
     @staticmethod
     def parse_docx(file_path: str, title: str) -> IngestionResult:
