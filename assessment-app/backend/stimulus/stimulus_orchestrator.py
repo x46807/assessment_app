@@ -33,7 +33,7 @@ class StimulusOrchestrator:
         material's own embedded images. The model sees the images,
         so the choice is by content, not by filename or guesswork.
         Returns None when no image is suitable -- the caller then
-        falls back to a web image."""
+        falls back to a text passage."""
         images = source_images[:8]
         parts = [
             "You are choosing a visual stimulus for assessment questions about the source text below. "
@@ -105,20 +105,22 @@ class StimulusOrchestrator:
         print(f"[Stimulus] planned modality={plan.stimulus_modality} preferred={preferred_modality} query={plan.search_query_or_theme!r}")
 
         if modality == "map_or_illustration":
-            # The source material's own images come first: they are
-            # the ones the questions are actually about. Only when
-            # none is suitable does the web get tried.
-            if source_images:
-                picked = self._pick_source_image(source_text, source_images)
-                if picked:
-                    return picked
+            # Outside sources come first: a curated web image is
+            # usually a cleaner stimulus than an image pulled out
+            # of a scanned source page. The source material's own
+            # images are the fallback when the web has nothing
+            # suitable for the question.
             query = plan.search_query_or_theme
             if "map" not in query.lower() and "illustration" not in query.lower():
                 query = query + " map"
             media = WikimediaProvider.search_media(query)
             if media:
                 return StimulusContext(stimulus_type="map", content=media["media_url"], attribution_or_context=media["attribution"])
-            print(f"[Stimulus] Wikimedia found no image for {query!r}; falling back to a text passage")
+            if source_images:
+                picked = self._pick_source_image(source_text, source_images)
+                if picked:
+                    return picked
+            print(f"[Stimulus] no web or source image for {query!r}; falling back to a text passage")
 
         if plan.stimulus_modality == "diagram_flowchart":
             diagram = DiagramProvider.format_mermaid_diagram(plan.synthetic_content_draft or "graph TD; A-->B;", plan.search_query_or_theme)
