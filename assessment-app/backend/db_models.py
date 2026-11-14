@@ -16,6 +16,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     buckets = relationship("TopicBucket", back_populates="user", cascade="all, delete-orphan")
+    reference_sets = relationship("ReferenceSet", back_populates="user", cascade="all, delete-orphan")
 
 class TopicBucket(Base):
     __tablename__ = "topic_buckets"
@@ -45,6 +46,37 @@ class TopicSource(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     bucket = relationship("TopicBucket", back_populates="sources")
+
+class ReferenceSet(Base):
+    """A named set of example questions, uploaded once and reusable
+    as the style reference for generating questions in any topic.
+    The examples are style only: they never become question content."""
+    __tablename__ = "reference_sets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="reference_sets")
+    examples = relationship("ReferenceExample", back_populates="reference_set", cascade="all, delete-orphan")
+
+class ReferenceExample(Base):
+    """One ingested example-question file (or URL) inside a reference set.
+    Mirrors TopicSource's extracted_content shape so the shared
+    build_example_style() helper works on both."""
+    __tablename__ = "reference_examples"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reference_set_id = Column(UUID(as_uuid=True), ForeignKey("reference_sets.id", ondelete="CASCADE"), nullable=False)
+    source_type = Column(String(50), nullable=False)
+    title = Column(String(255), nullable=False)
+    source_url = Column(Text, nullable=True)
+    extracted_content = Column(JSONB, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    reference_set = relationship("ReferenceSet", back_populates="examples")
 
 class GeneratedQuestionItem(Base):
     __tablename__ = "generated_questions"

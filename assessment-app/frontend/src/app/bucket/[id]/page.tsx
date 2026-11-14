@@ -18,6 +18,14 @@ interface SourceItem {
   created_at: string;
 }
 
+interface ReferenceSet {
+  id: string;
+  title: string;
+  description?: string | null;
+  created_at: string;
+  examples_count: number;
+}
+
 interface UploadResult {
   name: string;
   purpose: Purpose;
@@ -54,6 +62,11 @@ export default function BucketWorkspace() {
   const [questionCount, setQuestionCount] = useState(3);
   const [typology, setTypology] = useState("SCENARIO_VIGNETTE");
   const [injectStimulus, setInjectStimulus] = useState(false);
+  // "topic": this topic's own example questions (current behaviour).
+  // "none": ignore examples, the typology picker decides the type.
+  // Otherwise a reference-set id: use that set's examples as the style.
+  const [styleChoice, setStyleChoice] = useState("topic");
+  const [referenceSets, setReferenceSets] = useState<ReferenceSet[]>([]);
 
   // Files picked for the next bulk upload, with a purpose per file.
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -77,6 +90,7 @@ export default function BucketWorkspace() {
     setLoadingItems(true);
     apiFetch(`/api/buckets/${id}/items`).then(setItems).finally(() => setLoadingItems(false));
     loadSources();
+    apiFetch("/api/reference-sets").then(setReferenceSets).catch(() => setReferenceSets([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -180,10 +194,16 @@ export default function BucketWorkspace() {
     try {
       setGenerating(true);
       setGenerateError("");
+      const body: any = { count: questionCount, target_typology: typology, inject_external_stimulus: injectStimulus };
+      if (styleChoice === "none") {
+        body.use_topic_examples = false;
+      } else if (styleChoice !== "topic") {
+        body.reference_set_id = styleChoice;
+      }
       const newItems = await apiFetch(`/api/buckets/${id}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ count: questionCount, target_typology: typology, inject_external_stimulus: injectStimulus }),
+        body: JSON.stringify(body),
       });
       setItems((prev) => [...newItems, ...prev]);
       setActiveTab("practice");
@@ -367,9 +387,15 @@ export default function BucketWorkspace() {
             <div className="flex justify-between items-center mb-4">
               <div>
                 <h3 className="font-bold text-slate-900 flex items-center space-x-2"><Sparkles className="h-5 w-5 text-indigo-600" /><span>Generate Practice Items</span></h3>
-                <p className="text-xs text-slate-600">Tests Bloom&apos;s Level 3/4, grounded strictly in this bucket&apos;s source material. When this topic has example questions, their style and question type drive what gets generated; the typology picker below is the fallback when there are none.</p>
-              {exampleCount > 0 && (
+                <p className="text-xs text-slate-600">Tests Bloom&apos;s Level 3/4, grounded strictly in this bucket&apos;s source material. The style comes from a reference test set if you pick one below, otherwise from this topic&apos;s example questions; the typology picker is the fallback when there are none.</p>
+              {styleChoice !== "topic" && styleChoice !== "none" && (
+                <p className="text-xs text-amber-700 mt-1">Using the reference style &ldquo;{referenceSets.find((s) => s.id === styleChoice)?.title || "selected set"}&rdquo;.</p>
+              )}
+              {styleChoice === "topic" && exampleCount > 0 && (
                 <p className="text-xs text-amber-700 mt-1">Using the style of {exampleCount} example question file{exampleCount === 1 ? "" : "s"} in this topic.</p>
+              )}
+              {styleChoice === "none" && (
+                <p className="text-xs text-slate-500 mt-1">Ignoring this topic&apos;s example questions — the typology picker below decides the question type.</p>
               )}
               <p className="text-xs text-slate-500 mt-1">Generation can take a minute or two &mdash; please keep this tab open while it runs.</p>
               </div>
@@ -379,7 +405,17 @@ export default function BucketWorkspace() {
               </button>
             </div>
             {generateError && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-4">{generateError}</p>}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs pt-4 border-t border-indigo-100">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs pt-4 border-t border-indigo-100">
+              <div>
+                <label className="font-semibold block mb-1">Reference style</label>
+                <select value={styleChoice} onChange={(e) => setStyleChoice(e.target.value)} className="w-full p-2 border rounded-lg bg-white">
+                  <option value="topic">This topic&apos;s examples{exampleCount === 0 ? " (none yet)" : ""}</option>
+                  <option value="none">None — typology picker only</option>
+                  {referenceSets.map((s) => (
+                    <option key={s.id} value={s.id}>Reference set: {s.title} ({s.examples_count} file{s.examples_count === 1 ? "" : "s"})</option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="font-semibold block mb-1">Item Typology</label>
                 <select value={typology} onChange={(e) => setTypology(e.target.value)} className="w-full p-2 border rounded-lg bg-white">

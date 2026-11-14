@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from database import Base, engine, get_db
 import db_models
 from auth import verify_google_token, create_access_token, get_current_user
-from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse
+from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse
 from pipeline import MasterIngestionPipeline
 from generator import QuestionGeneratorEngine
 from classifier import SampleClassifier
@@ -39,8 +39,12 @@ def normalize_purpose(purpose):
     return value
 
 
-def build_example_style(example_sources):
-    """Analyse a bucket's example questions and turn them into generation style.
+def build_example_style(example_sources, label=None):
+    """Analyse example questions and turn them into generation style.
+
+    `label` names the examples in the prompt guidance, e.g. "the example
+    questions in this topic" (default) or "the example questions in
+    reference set 'AP History'".
 
     Returns (effective_typology, style_guidance, style_examples):
       - effective_typology: the typology the classifier detected in the
@@ -76,7 +80,7 @@ def build_example_style(example_sources):
         effective_typology = classified.detected_typology or None
         features = ", ".join(classified.structural_features) or "not specified"
         style_guidance = (
-            "STYLE REFERENCE - analysed from this topic's example questions "
+            "STYLE REFERENCE - analysed from " + (label or "the example questions in this topic") + " "
             "(these examples are the PRIMARY basis for what to generate):" + chr(10)
             + "- Detected question typology: " + str(classified.detected_typology) + chr(10)
             + "- Bloom's level: " + str(classified.detected_bloom_level) + chr(10)
@@ -88,7 +92,7 @@ def build_example_style(example_sources):
     except Exception as e:
         print("[ExampleStyle] Classifier failed, using raw example text as style reference: %s" % e)
         style_guidance = (
-            "STYLE REFERENCE - this topic's example questions are the PRIMARY "
+            "STYLE REFERENCE - " + (label or "the example questions in this topic") + " are the PRIMARY "
             "basis for what to generate: imitate their format, structure, "
             "phrasing, and cognitive level as closely as possible."
         )
@@ -328,6 +332,175 @@ def list_bucket_sources(
     sources = sorted(bucket.sources, key=lambda src: src.created_at or datetime.min)
     return [source_to_response(src) for src in sources]
 
+def get_reference_set_or_404(db, set_id, user_id):
+    ref_set = db.query(db_models.ReferenceSet).filter(
+        db_models.ReferenceSet.id == set_id,
+        db_models.ReferenceSet.user_id == user_id,
+    ).first()
+    if not ref_set:
+        raise HTTPException(status_code=404, detail="Reference set not found.")
+    return ref_set
+
+
+def reference_set_to_response(ref_set):
+    return ReferenceSetResponse(
+        id=ref_set.id,
+        title=ref_set.title,
+        description=ref_set.description,
+        created_at=ref_set.created_at,
+        examples_count=len(ref_set.examples),
+    )
+
+
+def reference_example_to_response(ex):
+    chunks = 0
+    try:
+        chunks = int((ex.extracted_content or {}).get("total_chunks", 0))
+    except Exception:  # noqa: BLE001 - malformed stored content must not break listing
+        chunks = 0
+    return ReferenceExampleResponse(
+        id=ex.id,
+        title=ex.title,
+        source_type=ex.source_type,
+        source_url=ex.source_url,
+        chunks=chunks,
+        created_at=ex.created_at,
+    )
+
+
+@app.get("/api/reference-sets", response_model=List[ReferenceSetResponse])
+def list_reference_sets(
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    ref_sets = db.query(db_models.ReferenceSet).filter(
+        db_models.ReferenceSet.user_id == current_user.id
+    ).order_by(db_models.ReferenceSet.created_at).all()
+    return [reference_set_to_response(s) for s in ref_sets]
+
+
+@app.post("/api/reference-sets", response_model=ReferenceSetResponse)
+def create_reference_set(
+    req: ReferenceSetCreate,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    ref_set = db_models.ReferenceSet(
+        user_id=current_user.id,
+        title=req.title,
+        description=req.description,
+    )
+    db.add(ref_set)
+    db.commit()
+    db.refresh(ref_set)
+    return reference_set_to_response(ref_set)
+
+
+@app.get("/api/reference-sets/{set_id}/examples", response_model=List[ReferenceExampleResponse])
+def list_reference_examples(
+    set_id: UUID,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    ref_set = get_reference_set_or_404(db, set_id, current_user.id)
+    examples = sorted(ref_set.examples, key=lambda ex: ex.created_at or datetime.min)
+    return [reference_example_to_response(ex) for ex in examples]
+
+
+@app.post("/api/reference-sets/{set_id}/examples/files")
+def ingest_files_to_reference_set(
+    set_id: UUID,
+    files: List[UploadFile] = File(...),
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Bulk upload example questions into a reference set. Each file
+    is ingested independently, so one bad file does not lose the rest."""
+    ref_set = get_reference_set_or_404(db, set_id, current_user.id)
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided.")
+
+    results = []
+    for upload in files:
+        filename = upload.filename or "unnamed file"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{filename}") as tmp:
+            shutil.copyfileobj(upload.file, tmp)
+            tmp_path = tmp.name
+        try:
+            result = ingestion_pipeline.ingest_file(tmp_path, title=filename)
+            example_record = db_models.ReferenceExample(
+                reference_set_id=ref_set.id,
+                source_type=result.source_type,
+                title=result.source_title,
+                extracted_content=result.model_dump()
+            )
+            db.add(example_record)
+            db.commit()
+            results.append({"filename": filename, "status": "success",
+                            "source_id": str(example_record.id),
+                            "chunks": result.total_chunks})
+        except Exception as exc:  # noqa: BLE001 - per-file failure must not abort the batch
+            db.rollback()
+            results.append({"filename": filename, "status": "error", "detail": str(exc)})
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+    return {"results": results}
+
+
+@app.post("/api/reference-sets/{set_id}/examples/url")
+def ingest_url_to_reference_set(
+    set_id: UUID,
+    url: str = Form(...),
+    title: Optional[str] = Form(None),
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    ref_set = get_reference_set_or_404(db, set_id, current_user.id)
+    result = ingestion_pipeline.ingest_url(url, title=title)
+    example_record = db_models.ReferenceExample(
+        reference_set_id=ref_set.id,
+        source_type=result.source_type,
+        title=result.source_title,
+        source_url=url,
+        extracted_content=result.model_dump()
+    )
+    db.add(example_record)
+    db.commit()
+    return {"status": "success", "source_id": str(example_record.id), "chunks": result.total_chunks}
+
+
+@app.delete("/api/reference-sets/{set_id}/examples/{example_id}")
+def delete_reference_example(
+    set_id: UUID,
+    example_id: UUID,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    ref_set = get_reference_set_or_404(db, set_id, current_user.id)
+    ex = db.query(db_models.ReferenceExample).filter(
+        db_models.ReferenceExample.id == example_id,
+        db_models.ReferenceExample.reference_set_id == ref_set.id,
+    ).first()
+    if not ex:
+        raise HTTPException(status_code=404, detail="Example not found in this reference set.")
+    db.delete(ex)
+    db.commit()
+    return {"status": "deleted"}
+
+
+@app.delete("/api/reference-sets/{set_id}")
+def delete_reference_set(
+    set_id: UUID,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    ref_set = get_reference_set_or_404(db, set_id, current_user.id)
+    db.delete(ref_set)
+    db.commit()
+    return {"status": "deleted"}
+
+
 @app.post("/api/buckets/{bucket_id}/generate")
 def generate_bucket_test(
     bucket_id: UUID,
@@ -346,9 +519,21 @@ def generate_bucket_test(
     generate_started = time.monotonic()
     content_sources = [src for src in bucket.sources
                        if (getattr(src, "purpose", None) or "source") == "source"]
-    example_sources = [src for src in bucket.sources
-                       if (getattr(src, "purpose", None) or "source") == "example"]
-    print("[Generate] bucket=%s sources=%d examples=%d count=%s" % (bucket_id, len(content_sources), len(example_sources), req.count))
+    # Style source, in order: a chosen reference set, this topic's own
+    # example questions, or nothing (the typology picker is the fallback).
+    # A reference set never becomes question content; it only sets style.
+    style_label = None
+    if req.reference_set_id:
+        ref_set = get_reference_set_or_404(db, req.reference_set_id, current_user.id)
+        example_sources = list(ref_set.examples)
+        style_label = "the example questions in reference set '%s'" % ref_set.title
+    elif req.use_topic_examples:
+        example_sources = [src for src in bucket.sources
+                           if (getattr(src, "purpose", None) or "source") == "example"]
+        style_label = "the example questions in this topic"
+    else:
+        example_sources = []
+    print("[Generate] bucket=%s sources=%d examples=%d count=%s style=%s" % (bucket_id, len(content_sources), len(example_sources), req.count, style_label or "typology picker"))
     if not content_sources:
         raise HTTPException(
             status_code=400,
@@ -373,7 +558,7 @@ def generate_bucket_test(
     # structure) and their text is passed as a style reference. When
     # examples exist, their detected typology drives generation; the
     # typology picked in the UI is the fallback when there are none.
-    detected_typology, style_guidance, style_examples = build_example_style(example_sources)
+    detected_typology, style_guidance, style_examples = build_example_style(example_sources, label=style_label)
     effective_typology = detected_typology or req.target_typology
     style_instructions = style_guidance
     if req.custom_style_instructions:

@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
+import ReferenceSets from "@/components/ReferenceSets";
 import { FolderPlus, Layers, ArrowRight, Loader2 } from "lucide-react";
 
 export default function Dashboard() {
@@ -81,6 +82,8 @@ export default function Dashboard() {
           ))}
         </div>
       )}
+
+      <ReferenceSets />
 
       {isModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
