@@ -1,4 +1,5 @@
 import os
+import random
 import re
 from typing import List, Optional
 from google import genai
@@ -68,13 +69,31 @@ class QuestionGeneratorEngine:
 
         if inject_external_stimulus or target_typology in ["STIMULUS_INTERPRETATION", "DATA_EVALUATION"]:
             try:
+                # Stimulus-format example sets mix text passages and
+                # images/maps: about 60% of generations use a text
+                # passage, about 40% a map or illustration (John,
+                # 2026-11-14). The whole batch shares one stimulus,
+                # so the split is per generation, not per question.
+                # An explicitly requested modality is always honoured.
+                if target_typology == "STIMULUS_INTERPRETATION" and not preferred_stimulus_modality:
+                    preferred_stimulus_modality = random.choices(
+                        ["primary_source_text", "map_or_illustration"], weights=[60, 40]
+                    )[0]
+                    print(f"[Generate] stimulus modality roll: {preferred_stimulus_modality} (60% text / 40% visual)")
                 style_context = None
                 if target_typology == "STIMULUS_INTERPRETATION":
-                    style_context = (
-                        "The generated items imitate stimulus-interpretation questions: each item is built "
-                        "around a stimulus the student must interpret -- in the example questions this is "
-                        "usually a map or illustration, not a passage of text."
-                    )
+                    if preferred_stimulus_modality == "map_or_illustration":
+                        style_context = (
+                            "The generated items imitate stimulus-interpretation questions: each item is built "
+                            "around a stimulus the student must interpret -- in the example questions this is "
+                            "usually a map or illustration, not a passage of text."
+                        )
+                    elif preferred_stimulus_modality == "primary_source_text":
+                        style_context = (
+                            "The generated items imitate stimulus-interpretation questions: each item is built "
+                            "around a stimulus the student must interpret -- in the example questions this is "
+                            "usually a short primary-source passage or quote."
+                        )
                 external_stimulus = self.stimulus_orchestrator.plan_and_fetch_stimulus(
                     source_text=source_context_str,
                     preferred_modality=preferred_stimulus_modality,

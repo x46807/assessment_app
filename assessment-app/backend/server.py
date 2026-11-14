@@ -592,10 +592,10 @@ def generate_bucket_test(
         style_instructions = (style_instructions + chr(10) + req.custom_style_instructions
                               if style_instructions else req.custom_style_instructions)
     print("[Generate] effective_typology=%s style_examples=%s" % (effective_typology, "yes" if style_examples else "no"))
+    # The 60% text / 40% visual split for stimulus-format sets is
+    # decided inside the generator (it rolls once per generation);
+    # an explicit preference in the request is passed through as-is.
     preferred_stimulus_modality = req.preferred_stimulus_modality
-    if effective_typology == "STIMULUS_INTERPRETATION" and not preferred_stimulus_modality:
-        preferred_stimulus_modality = "map_or_illustration"
-        print("[Generate] stimulus style is visual; preferring a map/illustration stimulus")
     style_started = time.monotonic()
     try:
         items = generator_engine.generate_questions(

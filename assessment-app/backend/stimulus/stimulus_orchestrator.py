@@ -89,6 +89,14 @@ class StimulusOrchestrator:
                 + (f"STYLE CONTEXT: {style_context}\n\n" if style_context else "")
                 + f"SOURCE:\n{source_text[:2500]}\n"
             )
+        elif preferred_modality == "primary_source_text":
+            plan_prompt = (
+                "Plan a PRIMARY SOURCE TEXT stimulus for this source text. "
+                "Give a short passage (a quote or excerpt) that pairs with the source text, "
+                "with its attribution, for a student to interpret.\n\n"
+                + (f"STYLE CONTEXT: {style_context}\n\n" if style_context else "")
+                + f"SOURCE:\n{source_text[:2500]}\n"
+            )
         else:
             plan_prompt = (
                 "Plan an external stimulus (primary source text, map query, diagram, or data table) that pairs with this source text.\n\n"
@@ -122,7 +130,7 @@ class StimulusOrchestrator:
                     return picked
             print(f"[Stimulus] no web or source image for {query!r}; falling back to a text passage")
 
-        if plan.stimulus_modality == "diagram_flowchart":
+        if preferred_modality != "primary_source_text" and plan.stimulus_modality == "diagram_flowchart":
             diagram = DiagramProvider.format_mermaid_diagram(plan.synthetic_content_draft or "graph TD; A-->B;", plan.search_query_or_theme)
             return StimulusContext(stimulus_type="diagram", content=diagram["content"], attribution_or_context=diagram["attribution"])
 
