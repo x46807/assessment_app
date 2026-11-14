@@ -225,7 +225,7 @@ export default function BucketWorkspace() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           <div className="bg-white p-6 rounded-2xl border border-slate-200">
             <h3 className="font-bold text-slate-900 mb-1">Upload Documents</h3>
-            <p className="text-xs text-slate-500 mb-4">PDF, Word DOCX, and text files. Pick several at once.</p>
+            <p className="text-xs text-slate-500 mb-4">PDF, Word DOCX, text, and image files (JPG/PNG). Pick several at once.</p>
 
             <div className="mb-4">
               <p className="text-xs font-semibold text-slate-700 uppercase mb-2">Upload these files as</p>
@@ -253,7 +253,7 @@ export default function BucketWorkspace() {
               <UploadCloud className="h-8 w-8 text-slate-400 mb-2" />
               <span className="text-sm font-medium text-slate-700">Choose files to ingest</span>
               <span className="text-xs text-slate-400 mt-1">You can add more files after picking the first set</span>
-              <input type="file" multiple onChange={handleFileSelect} disabled={uploading} className="hidden" accept=".pdf,.docx,.txt" />
+              <input type="file" multiple onChange={handleFileSelect} disabled={uploading} className="hidden" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" />
             </label>
 
             {selectedFiles.length > 0 && (

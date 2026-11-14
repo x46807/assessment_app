@@ -11,7 +11,7 @@ class SourceChunk(BaseModel):
 
 class IngestionResult(BaseModel):
     source_title: str
-    source_type: Literal["pdf", "docx", "text", "web", "youtube", "audio_video", "gdoc"]
+    source_type: Literal["pdf", "docx", "text", "web", "youtube", "audio_video", "gdoc", "image"]
     total_chunks: int
     chunks: List[SourceChunk]
 

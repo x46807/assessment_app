@@ -4,6 +4,7 @@ from models import IngestionResult
 from parsers.document_parser import DocumentParser
 from parsers.web_parser import WebParser
 from parsers.media_parser import MediaParser
+from parsers.image_parser import ImageParser
 
 class MasterIngestionPipeline:
     def ingest_url(self, url: str, title: Optional[str] = None) -> IngestionResult:
@@ -28,5 +29,7 @@ class MasterIngestionPipeline:
             return DocumentParser.parse_docx(file_path, title=doc_title)
         elif ext in ["txt", "md"]:
             return DocumentParser.parse_txt(file_path, title=doc_title)
+        elif ext in ["jpg", "jpeg", "png"]:
+            return ImageParser.parse_image(file_path, title=doc_title)
         else:
             raise NotImplementedError(f"Unsupported file format: .{ext}")
