@@ -10,12 +10,15 @@ interface ReferenceSet {
   description?: string | null;
   created_at: string;
   examples_count: number;
+  source_count: number;
+  is_source_enriched: boolean;
 }
 
 interface ReferenceExample {
   id: string;
   title: string;
   source_type: string;
+  purpose: string;
   source_url?: string | null;
   chunks: number;
   created_at: string;
@@ -31,6 +34,9 @@ export default function ReferenceSets() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [examples, setExamples] = useState<Record<string, ReferenceExample[]>>({});
   const [uploading, setUploading] = useState<Record<string, boolean>>({});
+  // Per-set choice for the next upload: example questions, or the
+  // source material the questions were written about.
+  const [uploadPurpose, setUploadPurpose] = useState<Record<string, "example" | "source">>({});
   const [error, setError] = useState("");
 
   const loadSets = async () => {
@@ -87,6 +93,7 @@ export default function ReferenceSets() {
     try {
       const formData = new FormData();
       Array.from(files).forEach((f) => formData.append("files", f));
+      formData.append("purpose", uploadPurpose[setId] || "example");
       const data = await apiFetch(`/api/reference-sets/${setId}/examples/files`, { method: "POST", body: formData });
       const failed = (data.results || []).filter((r: any) => r.status !== "success");
       if (failed.length > 0) {
@@ -108,7 +115,7 @@ export default function ReferenceSets() {
   };
 
   const handleDeleteSet = async (setId: string) => {
-    if (!window.confirm("Delete this reference set and all its example files?")) return;
+    if (!window.confirm("Delete this reference set and all its files?")) return;
     await apiFetch(`/api/reference-sets/${setId}`, { method: "DELETE" });
     setSets((prev) => prev.filter((s) => s.id !== setId));
   };
@@ -118,7 +125,7 @@ export default function ReferenceSets() {
       <div className="flex justify-between items-center pb-6 border-b border-slate-200">
         <div>
           <h2 className="text-xl font-bold text-slate-900">Reference Test Sets</h2>
-          <p className="text-sm text-slate-500">Upload a set of example questions once, then reuse its style when generating in any topic — no need to re-upload the examples for every topic.</p>
+          <p className="text-sm text-slate-500">Upload a set of example questions once, then reuse its style when generating in any topic — no need to re-upload the examples for every topic. You can also upload the source material the questions were written about, so the model learns how questions connect to that kind of source.</p>
         </div>
         <button onClick={() => setShowCreate(true)} className="flex items-center space-x-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg shadow-sm transition-colors shrink-0">
           <Plus className="h-4 w-4" />
@@ -145,7 +152,10 @@ export default function ReferenceSets() {
                   {expanded[s.id] ? <ChevronDown className="h-4 w-4 text-slate-400 mt-1 shrink-0" /> : <ChevronRight className="h-4 w-4 text-slate-400 mt-1 shrink-0" />}
                   <span>
                     <span className="block font-semibold text-slate-900 truncate">{s.title}</span>
-                    <span className="block text-xs text-slate-500 mt-1">{s.examples_count} example file{s.examples_count === 1 ? "" : "s"}</span>
+                    <span className="block text-xs text-slate-500 mt-1">{s.examples_count} example file{s.examples_count === 1 ? "" : "s"}{s.source_count > 0 ? ` · ${s.source_count} source file${s.source_count === 1 ? "" : "s"}` : ""}</span>
+                    {s.is_source_enriched && (
+                      <span className="inline-block mt-1.5 text-[11px] font-semibold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full">Source-enriched</span>
+                    )}
                   </span>
                 </button>
                 <button onClick={() => handleDeleteSet(s.id)} aria-label="Delete reference set" className="text-slate-400 hover:text-red-600 shrink-0">
@@ -154,12 +164,26 @@ export default function ReferenceSets() {
               </div>
               {s.description && <p className="text-sm text-slate-500 mt-2 line-clamp-2">{s.description}</p>}
 
-              <label className="mt-4 border-2 border-dashed border-slate-300 rounded-xl p-4 flex flex-col items-center justify-center cursor-pointer hover:border-indigo-500 bg-slate-50/50">
+              <div className="mt-4 flex items-center gap-2">
+                <label htmlFor={`purpose-${s.id}`} className="text-xs font-medium text-slate-600 shrink-0">Upload files as</label>
+                <select
+                  id={`purpose-${s.id}`}
+                  value={uploadPurpose[s.id] || "example"}
+                  onChange={(e) => setUploadPurpose((prev) => ({ ...prev, [s.id]: e.target.value as "example" | "source" }))}
+                  disabled={uploading[s.id]}
+                  className="flex-1 min-w-0 text-xs border rounded-lg px-2 py-1.5 bg-white"
+                >
+                  <option value="example">Example questions</option>
+                  <option value="source">Source material</option>
+                </select>
+              </div>
+              <label className="mt-2 border-2 border-dashed border-slate-300 rounded-xl p-4 flex flex-col items-center justify-center cursor-pointer hover:border-indigo-500 bg-slate-50/50">
                 <UploadCloud className="h-6 w-6 text-slate-400 mb-1" />
-                <span className="text-xs font-medium text-slate-700">{uploading[s.id] ? "Ingesting..." : "Upload example questions"}</span>
+                <span className="text-xs font-medium text-slate-700">{uploading[s.id] ? "Ingesting..." : (uploadPurpose[s.id] === "source" ? "Upload source material" : "Upload example questions")}</span>
                 <span className="text-xs text-slate-400">PDF, Word, text, or image files</span>
                 <input type="file" multiple disabled={uploading[s.id]} className="hidden" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" onChange={(e) => { handleUpload(s.id, e.target.files); e.target.value = ""; }} />
               </label>
+              <p className="text-[11px] text-slate-400 mt-2">Source material is the content the example questions were written about — uploading it makes this set source-enriched, so generation learns what kinds of questions that kind of source gives rise to.</p>
 
               {expanded[s.id] && (
                 <ul className="mt-4 space-y-2">
@@ -173,6 +197,11 @@ export default function ReferenceSets() {
                           <span className="block truncate font-medium text-slate-800">{ex.title}</span>
                           <span className="block text-xs text-slate-400">{ex.source_type} · {ex.chunks} chunk{ex.chunks === 1 ? "" : "s"}</span>
                         </span>
+                        {ex.purpose === "source" ? (
+                          <span className="text-[11px] font-semibold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full shrink-0">Source material</span>
+                        ) : (
+                          <span className="text-[11px] font-semibold bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full shrink-0">Example questions</span>
+                        )}
                         <button onClick={() => handleDeleteExample(s.id, ex.id)} aria-label="Delete example file" className="text-slate-400 hover:text-red-600 shrink-0">
                           <Trash2 className="h-4 w-4" />
                         </button>

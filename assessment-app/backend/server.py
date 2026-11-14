@@ -31,6 +31,14 @@ try:
 except Exception as _e:  # noqa: BLE001 - startup must not fail on this
     print(f"[Startup] Could not ensure topic_sources.purpose column: {_e}")
 
+# Existing databases were created before reference examples gained a
+# `purpose` column, and create_all() does not alter existing tables.
+try:
+    with engine.begin() as _conn:
+        _conn.execute(text("ALTER TABLE reference_examples ADD COLUMN IF NOT EXISTS purpose VARCHAR(20) NOT NULL DEFAULT 'example'"))
+except Exception as _e:  # noqa: BLE001 - startup must not fail on this
+    print(f"[Startup] Could not ensure reference_examples.purpose column: {_e}")
+
 # Existing databases were created before generated questions gained a
 # `bank_id` column, and create_all() does not alter existing tables.
 try:
@@ -48,7 +56,7 @@ def normalize_purpose(purpose):
     return value
 
 
-def build_example_style(example_sources, label=None):
+def build_example_style(example_sources, label=None, source_sources=None):
     """Analyse example questions and turn them into generation style.
 
     `label` names the examples in the prompt guidance, e.g. "the example
@@ -84,6 +92,32 @@ def build_example_style(example_sources, label=None):
     style_examples = example_text[:6000]
     style_guidance = None
     effective_typology = None
+    linkage_section = None
+    if source_sources:
+        source_text = ""
+        for src in source_sources:
+            try:
+                src_data = IngestionResult.model_validate(src.extracted_content)
+                source_text += src_data.to_llm_context() + chr(10)
+            except Exception as e:
+                print("[ExampleStyle] Skipping unreadable source file %s: %s" % (getattr(src, "id", "?"), e))
+        source_text = source_text.strip()
+        if source_text:
+            try:
+                linkage = SampleClassifier().analyze_source_linkage(example_text[:6000], source_text[:6000])
+                print("[ExampleStyle] Source linkage analysed: %d pattern(s)" % len(linkage.question_source_patterns))
+                linkage_section = (
+                    chr(10) + "SOURCE-ENRICHED SET -- how the example questions connect to the source material "
+                    "they were written about (use this to judge what kinds of questions the NEW source "
+                    "material should give rise to):" + chr(10)
+                    + linkage.linkage_guidance
+                )
+                if linkage.question_source_patterns:
+                    linkage_section += chr(10) + "- " + (chr(10) + "- ").join(linkage.question_source_patterns)
+            except Exception as e:
+                # Linkage analysis must never break generation: the
+                # set still works as a plain (non-enriched) style set.
+                print("[ExampleStyle] Source linkage analysis failed, continuing without it: %s" % e)
     try:
         classified = SampleClassifier().analyze_samples(example_text[:8000])
         effective_typology = classified.detected_typology or None
@@ -112,6 +146,8 @@ def build_example_style(example_sources, label=None):
             "basis for what to generate: imitate their format, structure, "
             "phrasing, and cognitive level as closely as possible."
         )
+    if linkage_section:
+        style_guidance = (style_guidance or "") + linkage_section
     return effective_typology, style_guidance, style_examples
 
 
@@ -367,12 +403,18 @@ def get_reference_set_or_404(db, set_id, user_id):
 
 
 def reference_set_to_response(ref_set):
+    source_count = sum(
+        1 for ex in ref_set.examples
+        if (getattr(ex, "purpose", None) or "example") == "source"
+    )
     return ReferenceSetResponse(
         id=ref_set.id,
         title=ref_set.title,
         description=ref_set.description,
         created_at=ref_set.created_at,
         examples_count=len(ref_set.examples),
+        source_count=source_count,
+        is_source_enriched=source_count > 0,
     )
 
 
@@ -386,6 +428,7 @@ def reference_example_to_response(ex):
         id=ex.id,
         title=ex.title,
         source_type=ex.source_type,
+        purpose=getattr(ex, "purpose", None) or "example",
         source_url=ex.source_url,
         chunks=chunks,
         created_at=ex.created_at,
@@ -435,12 +478,16 @@ def list_reference_examples(
 def ingest_files_to_reference_set(
     set_id: UUID,
     files: List[UploadFile] = File(...),
+    purpose: Optional[str] = Form("example"),
     current_user: db_models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Bulk upload example questions into a reference set. Each file
-    is ingested independently, so one bad file does not lose the rest."""
+    """Bulk upload files into a reference set -- example questions by
+    default, or source material (purpose="source") the questions were
+    written about, making the set source-enriched. Each file is
+    ingested independently, so one bad file does not lose the rest."""
     ref_set = get_reference_set_or_404(db, set_id, current_user.id)
+    purpose = normalize_purpose(purpose)
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
 
@@ -454,6 +501,7 @@ def ingest_files_to_reference_set(
             result = ingestion_pipeline.ingest_file(tmp_path, title=filename)
             example_record = db_models.ReferenceExample(
                 reference_set_id=ref_set.id,
+                purpose=purpose,
                 source_type=result.source_type,
                 title=result.source_title,
                 extracted_content=result.model_dump()
@@ -477,10 +525,12 @@ def ingest_url_to_reference_set(
     set_id: UUID,
     url: str = Form(...),
     title: Optional[str] = Form(None),
+    purpose: Optional[str] = Form("example"),
     current_user: db_models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     ref_set = get_reference_set_or_404(db, set_id, current_user.id)
+    purpose = normalize_purpose(purpose)
     try:
         result = ingestion_pipeline.ingest_url(url, title=title)
     except Exception as e:
@@ -488,6 +538,7 @@ def ingest_url_to_reference_set(
         raise HTTPException(status_code=502, detail="Could not ingest this link: %s" % str(e)[:300])
     example_record = db_models.ReferenceExample(
         reference_set_id=ref_set.id,
+        purpose=purpose,
         source_type=result.source_type,
         title=result.source_title,
         source_url=url,
@@ -652,9 +703,17 @@ def generate_bucket_test(
     # example questions, or nothing (the typology picker is the fallback).
     # A reference set never becomes question content; it only sets style.
     style_label = None
+    source_sources = []
     if req.reference_set_id:
         ref_set = get_reference_set_or_404(db, req.reference_set_id, current_user.id)
-        example_sources = list(ref_set.examples)
+        all_ref_files = list(ref_set.examples)
+        example_sources = [ex for ex in all_ref_files
+                         if (getattr(ex, "purpose", None) or "example") == "example"]
+        # Source material uploaded with the set: used only to analyse
+        # how the questions connect to their source (linkage guidance).
+        # It never becomes question content.
+        source_sources = [ex for ex in all_ref_files
+                        if (getattr(ex, "purpose", None) or "example") == "source"]
         style_label = "the example questions in reference set '%s'" % ref_set.title
     elif req.use_topic_examples:
         example_sources = [src for src in bucket.sources
@@ -694,7 +753,8 @@ def generate_bucket_test(
     # structure) and their text is passed as a style reference. When
     # examples exist, their detected typology drives generation; the
     # typology picked in the UI is the fallback when there are none.
-    detected_typology, style_guidance, style_examples = build_example_style(example_sources, label=style_label)
+    detected_typology, style_guidance, style_examples = build_example_style(
+        example_sources, label=style_label, source_sources=source_sources)
     effective_typology = detected_typology or req.target_typology
     style_instructions = style_guidance
     if req.custom_style_instructions:

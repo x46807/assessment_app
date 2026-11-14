@@ -60,6 +60,11 @@ class ReferenceSetResponse(BaseModel):
     description: Optional[str]
     created_at: datetime
     examples_count: int = 0
+    # Files uploaded as source material (not example questions).
+    source_count: int = 0
+    # True when the set has source material: the designator that
+    # marks a source-enriched reference set.
+    is_source_enriched: bool = False
 
     class Config:
         from_attributes = True
@@ -68,6 +73,7 @@ class ReferenceExampleResponse(BaseModel):
     id: UUID
     title: str
     source_type: str
+    purpose: str = "example"
     source_url: Optional[str] = None
     chunks: int = 0
     created_at: datetime

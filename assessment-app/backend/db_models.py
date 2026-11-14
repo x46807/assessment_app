@@ -66,11 +66,16 @@ class ReferenceSet(Base):
 class ReferenceExample(Base):
     """One ingested example-question file (or URL) inside a reference set.
     Mirrors TopicSource's extracted_content shape so the shared
-    build_example_style() helper works on both."""
+    build_example_style() helper works on both.
+    purpose "example": the example questions themselves.
+    purpose "source": source material the questions were written
+    about, so the model can learn how questions connect to that
+    kind of source (a source-enriched reference set)."""
     __tablename__ = "reference_examples"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     reference_set_id = Column(UUID(as_uuid=True), ForeignKey("reference_sets.id", ondelete="CASCADE"), nullable=False)
+    purpose = Column(String(20), nullable=False, default="example", server_default="example")
     source_type = Column(String(50), nullable=False)
     title = Column(String(255), nullable=False)
     source_url = Column(Text, nullable=True)

@@ -19,9 +19,48 @@ class ClassifiedSample(BaseModel):
     structural_features: List[str]
     recommended_prompt_guidance: str
 
+class SourceLinkage(BaseModel):
+    """How example questions connect to the source material they were
+    written about: which features of the source the questions target,
+    and what kinds of questions this kind of source gives rise to.
+    Meta-guidance only -- it carries no source facts, so it is safe
+    to pass to the generator as style guidance."""
+    linkage_guidance: str
+    question_source_patterns: List[str] = []
+
+
 class SampleClassifier:
     def __init__(self, api_key: str = None):
         self.client = make_gemini_client(api_key)
+
+    def analyze_source_linkage(self, example_text: str, source_text: str) -> SourceLinkage:
+        """Connect the dots between example questions and the source
+        material they were written about, so the generator learns
+        what types of questions this kind of source material gives
+        rise to. Only the returned guidance (not the source text
+        itself) is ever passed on to generation."""
+        prompt = (
+            "You are an expert psychometrician. Below are example assessment questions AND the source material "
+            "they were written about. Explain how the questions connect to the source material, so a question "
+            "generator can learn what types of questions this kind of source material gives rise to.\n\n"
+            "For each pattern, say which feature of the source the questions target (a map, a timeline, an "
+            "argument, data, a passage, a diagram) and what kind of question it produces (e.g. interpreting "
+            "the map, sequencing events, evaluating a claim). Then summarise it in a few sentences of guidance "
+            "for generating new questions from NEW source material of the same kind. Do not repeat facts from "
+            "the source material itself -- describe the relationship, not the content.\n\n"
+            "EXAMPLE QUESTIONS:\n" + example_text[:6000] + "\n\n"
+            "SOURCE MATERIAL THE QUESTIONS WERE WRITTEN ABOUT:\n" + source_text[:6000] + "\n"
+        )
+        response = self.client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=gemini_response_schema(SourceLinkage),
+                temperature=0.3,
+            )
+        )
+        return SourceLinkage.model_validate_json(response.text)
 
     def analyze_samples(self, raw_sample_text: str) -> ClassifiedSample:
         prompt = (
