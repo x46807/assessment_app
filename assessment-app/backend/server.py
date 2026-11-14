@@ -263,7 +263,11 @@ def ingest_url_to_bucket(
     bucket = get_bucket_or_404(db, bucket_id, current_user.id)
     purpose = normalize_purpose(purpose)
 
-    result = ingestion_pipeline.ingest_url(url, title=title)
+    try:
+        result = ingestion_pipeline.ingest_url(url, title=title)
+    except Exception as e:
+        print("[IngestURL] FAILED url=%s: %s: %s" % (url, type(e).__name__, e))
+        raise HTTPException(status_code=502, detail="Could not ingest this link: %s" % str(e)[:300])
     source_record = db_models.TopicSource(
         bucket_id=bucket.id,
         source_type=result.source_type,
@@ -457,7 +461,11 @@ def ingest_url_to_reference_set(
     db: Session = Depends(get_db)
 ):
     ref_set = get_reference_set_or_404(db, set_id, current_user.id)
-    result = ingestion_pipeline.ingest_url(url, title=title)
+    try:
+        result = ingestion_pipeline.ingest_url(url, title=title)
+    except Exception as e:
+        print("[IngestURL] FAILED url=%s: %s: %s" % (url, type(e).__name__, e))
+        raise HTTPException(status_code=502, detail="Could not ingest this link: %s" % str(e)[:300])
     example_record = db_models.ReferenceExample(
         reference_set_id=ref_set.id,
         source_type=result.source_type,

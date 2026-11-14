@@ -56,6 +56,7 @@ export default function BucketWorkspace() {
   const [urlInput, setUrlInput] = useState("");
   const [urlTitle, setUrlTitle] = useState("");
   const [urlPurpose, setUrlPurpose] = useState<Purpose>("source");
+  const [urlError, setUrlError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState("");
@@ -181,10 +182,18 @@ export default function BucketWorkspace() {
     if (urlTitle) formData.append("title", urlTitle);
     try {
       setUploading(true);
+      setUrlError("");
       await apiFetch(`/api/buckets/${id}/sources/url`, { method: "POST", body: formData });
       setUrlInput("");
       setUrlTitle("");
       await loadSources();
+    } catch (err: any) {
+      const message = err?.message || "Link ingest failed";
+      setUrlError(
+        message.includes("Failed to fetch")
+          ? "The request did not reach the server or timed out. The backend may have been restarting for a deploy. Please wait a moment and try again."
+          : message
+      );
     } finally {
       setUploading(false);
     }
@@ -346,9 +355,10 @@ export default function BucketWorkspace() {
                 </select>
               </label>
               <button type="submit" disabled={uploading} className="w-full py-2.5 bg-slate-900 text-white text-sm font-semibold rounded-lg flex items-center justify-center space-x-2 disabled:opacity-60">
-                <LinkIcon className="h-4 w-4" />
-                <span>Ingest Link</span>
+                {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <LinkIcon className="h-4 w-4" />}
+                <span>{uploading ? "Ingesting..." : "Ingest Link"}</span>
               </button>
+              {urlError && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{urlError}</p>}
             </form>
           </div>
 

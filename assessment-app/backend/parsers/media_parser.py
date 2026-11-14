@@ -1,6 +1,6 @@
 import re
 from typing import List, Optional
-from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
 from models import SourceChunk, IngestionResult
 
 class MediaParser:
@@ -18,7 +18,17 @@ class MediaParser:
         if not video_id:
             raise ValueError(f"Invalid YouTube URL: {youtube_url}")
 
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        # youtube-transcript-api 1.x: the old classmethod get_transcript()
+        # no longer exists. fetch() returns a FetchedTranscript; to_raw_data()
+        # gives back the list-of-dicts shape (text/start/duration) this
+        # loop expects.
+        try:
+            transcript_list = YouTubeTranscriptApi().fetch(video_id).to_raw_data()
+        except (NoTranscriptFound, TranscriptsDisabled):
+            raise ValueError(
+                "This YouTube video has no captions/transcript available, "
+                "so it cannot be used as source material."
+            )
         chunks: List[SourceChunk] = []
         chunk_idx = 0
         current_text = []
