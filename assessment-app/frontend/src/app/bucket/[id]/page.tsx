@@ -702,7 +702,7 @@ export default function BucketWorkspace() {
               </div>
               <div>
                 <label className="font-semibold block mb-1">Question Count</label>
-                <input type="number" min={1} max={10} value={questionCount} onChange={(e) => setQuestionCount(Number(e.target.value))} className="w-full p-2 border rounded-lg bg-white" />
+                <input type="number" min={1} max={20} value={questionCount} onChange={(e) => setQuestionCount(Math.min(20, Math.max(1, Number(e.target.value) || 1)))} className="w-full p-2 border rounded-lg bg-white" />
               </div>
               <div>
                 <label className="font-semibold block mb-1">Save to bank</label>

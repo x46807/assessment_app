@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Any, Dict
 from uuid import UUID
 from datetime import datetime
@@ -163,7 +163,11 @@ class ReferenceExampleResponse(BaseModel):
         from_attributes = True
 
 class GenerateRequest(BaseModel):
-    count: int = 5
+    # At most 20 questions per generation (John, 2026-11-15; was 10,
+    # enforced only by the frontend input). Above that the batch
+    # becomes many model calls; a larger count is rejected with a
+    # 422 instead of silently running up the cost.
+    count: int = Field(default=5, ge=1, le=20)
     target_typology: Optional[str] = "SCENARIO_VIGNETTE"
     question_type: Optional[str] = "multiple_choice"
     inject_external_stimulus: bool = False
