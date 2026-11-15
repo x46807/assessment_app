@@ -42,6 +42,11 @@ class SourceResponse(BaseModel):
     # ingested_at is when that content was first parsed.
     reused: bool = False
     ingested_at: Optional[datetime] = None
+    # The pages in scope for generation, as typed ("1-3, 5"),
+    # or None for all pages; page_count is the source's total
+    # pages (None for non-paginated sources).
+    page_range: Optional[str] = None
+    page_count: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -62,7 +67,11 @@ class QuestionBankRename(BaseModel):
 
 
 class SourceFlagRequest(BaseModel):
-    is_concepts_source: bool
+    # Each field is applied only when present in the request,
+    # so the same endpoint flags a concepts source and/or sets
+    # a page range. page_range "" clears it back to all pages.
+    is_concepts_source: Optional[bool] = None
+    page_range: Optional[str] = None
 
 
 class AttemptCreate(BaseModel):

@@ -21,6 +21,8 @@ interface SourceItem {
   created_at: string;
   reused?: boolean;
   ingested_at?: string | null;
+  page_range?: string | null;
+  page_count?: number | null;
 }
 
 interface ReferenceSet {
@@ -90,6 +92,8 @@ export default function BucketWorkspace() {
   const [sourceFlagError, setSourceFlagError] = useState("");
   const [reingestError, setReingestError] = useState("");
   const [reingestingId, setReingestingId] = useState<string | null>(null);
+  const [pageRangeEditingId, setPageRangeEditingId] = useState<string | null>(null);
+  const [pageRangeDraft, setPageRangeDraft] = useState("");
   // "topic": this topic's own example questions (current behaviour).
   // "none": ignore examples, the typology picker decides the type.
   // Otherwise a reference-set id: use that set's examples as the style.
@@ -296,6 +300,21 @@ export default function BucketWorkspace() {
       setReingestError(err?.message || "Could not re-ingest this link.");
     } finally {
       setReingestingId(null);
+    }
+  };
+
+  const savePageRange = async (source: SourceItem) => {
+    setSourceFlagError("");
+    try {
+      const updated = await apiFetch(`/api/buckets/${id}/sources/${source.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ page_range: pageRangeDraft }),
+      });
+      setSources((prev) => prev.map((s) => (s.id === source.id ? updated : s)));
+      setPageRangeEditingId(null);
+    } catch (err: any) {
+      setSourceFlagError(err?.message || "Could not save the page range");
     }
   };
 
@@ -520,6 +539,30 @@ export default function BucketWorkspace() {
                       >
                         {s.is_concepts_source ? "Key concepts ✓" : "Mark as key concepts"}
                       </button>
+                    )}
+                    {s.source_type === "pdf" && s.purpose === "source" && (
+                      pageRangeEditingId === s.id ? (
+                        <span className="flex items-center gap-1 shrink-0">
+                          <input
+                            value={pageRangeDraft}
+                            onChange={(e) => setPageRangeDraft(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") savePageRange(s); if (e.key === "Escape") setPageRangeEditingId(null); }}
+                            placeholder="e.g. 1-3, 5"
+                            aria-label="Pages in scope"
+                            className="w-28 px-2 py-1 border rounded-lg text-xs"
+                          />
+                          <button onClick={() => savePageRange(s)} className="text-xs font-semibold px-2 py-1 rounded-full bg-indigo-600 text-white shrink-0">Save</button>
+                          <button onClick={() => setPageRangeEditingId(null)} className="text-xs font-semibold px-2 py-1 rounded-full bg-slate-100 text-slate-600 shrink-0">Cancel</button>
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => { setPageRangeDraft(s.page_range || ""); setPageRangeEditingId(s.id); }}
+                          title={s.page_count ? `In scope for generation: ${s.page_range || "all pages"} of ${s.page_count} pages` : "Choose which pages are in scope for generation"}
+                          className="text-xs font-semibold px-2 py-1 rounded-full shrink-0 bg-slate-100 text-slate-600 hover:bg-slate-200"
+                        >
+                          {s.page_range ? `Pages ${s.page_range}` : "All pages"}{s.page_count ? ` of ${s.page_count}` : ""}
+                        </button>
+                      )
                     )}
                     {s.source_url && (
                       <button

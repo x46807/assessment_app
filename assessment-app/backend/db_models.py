@@ -89,6 +89,10 @@ class TopicSource(Base):
     # True when this row reused an existing shared parse instead
     # of parsing the upload itself.
     reused = Column(Boolean, nullable=False, default=False, server_default="false")
+    # For paginated sources (PDFs): the pages in scope for
+    # generation, as the user typed them ("1-3, 5, 8-10").
+    # NULL or empty means all pages.
+    page_range = Column(Text, nullable=True)
     extracted_content = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

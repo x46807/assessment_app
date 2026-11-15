@@ -20,6 +20,7 @@ from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, Topi
 from feedback import FeedbackAnalyzer, DetailedFeedback
 from pipeline import MasterIngestionPipeline
 from dedup import PARSER_VERSION, hash_file_path, url_content_hash
+from page_range import parse_page_range, page_count_for_content, filter_to_pages
 from generator import QuestionGeneratorEngine
 from classifier import SampleClassifier, KeyConceptExtractor
 from models import IngestionResult
@@ -81,6 +82,7 @@ try:
         _conn.execute(text("ALTER TABLE reference_examples ADD COLUMN IF NOT EXISTS parsed_source_id UUID"))
         _conn.execute(text("ALTER TABLE reference_examples ADD COLUMN IF NOT EXISTS reused BOOLEAN NOT NULL DEFAULT FALSE"))
         _conn.execute(text("ALTER TABLE reference_examples ALTER COLUMN extracted_content DROP NOT NULL"))
+        _conn.execute(text("ALTER TABLE topic_sources ADD COLUMN IF NOT EXISTS page_range TEXT"))
 except Exception as _e:  # noqa: BLE001 - startup must not fail on this
     print(f"[Startup] Could not ensure dedup columns: {_e}")
 
@@ -257,6 +259,23 @@ def _source_content_info(row):
     return content, False, getattr(row, "created_at", None)
 
 
+def _scoped_source_data(src):
+    """The source's parsed content restricted to its selected
+    pages (all pages when no range is set). A stored range that
+    no longer parses is logged and ignored -- generation must
+    never break on it, since the range was validated when saved."""
+    src_data = get_parsed_result(src)
+    page_range = getattr(src, "page_range", None)
+    if not page_range:
+        return src_data
+    try:
+        pages = parse_page_range(page_range, max_page=page_count_for_content(_parsed_content_dict(src)))
+    except ValueError:
+        print("[PageRange] Stored range %r for source %s is invalid; using all pages." % (page_range, getattr(src, "id", "?")))
+        return src_data
+    return filter_to_pages(src_data, pages)
+
+
 def _lookup_shared_parse(db, user_id, kind, content_hash):
     return db.query(db_models.ParsedSource).filter(
         db_models.ParsedSource.user_id == user_id,
@@ -350,6 +369,8 @@ def source_to_response(source):
         created_at=source.created_at,
         reused=reused,
         ingested_at=ingested_at,
+        page_range=getattr(source, "page_range", None),
+        page_count=page_count_for_content(content),
     )
 
 app = FastAPI(title="Psychometric Assessment Generation API")
@@ -598,7 +619,10 @@ def flag_source_concepts(
     concepts / objectives -- e.g. a course outline or summary slides.
     A flagged source defines WHAT to test when "conceptual
     understanding" is enabled at generation time; it is not itself
-    question content."""
+    question content. Also sets the pages of a paginated source
+    (PDF) that are in scope for generation; an empty range clears
+    it back to all pages. Each field is applied only when present
+    in the request."""
     bucket = get_bucket_or_404(db, bucket_id, current_user.id)
     src = db.query(db_models.TopicSource).filter(
         db_models.TopicSource.id == source_id,
@@ -607,8 +631,21 @@ def flag_source_concepts(
     if not src:
         raise HTTPException(status_code=404, detail="Source not found in this topic.")
     if (getattr(src, "purpose", None) or "source") != "source":
-        raise HTTPException(status_code=400, detail="Only source material can be flagged as key concepts; example questions cannot.")
-    src.is_concepts_source = req.is_concepts_source
+        raise HTTPException(status_code=400, detail="Only source material can be flagged or page-scoped; example questions cannot.")
+    if req.is_concepts_source is not None:
+        src.is_concepts_source = req.is_concepts_source
+    if req.page_range is not None:
+        if src.source_type != "pdf":
+            raise HTTPException(status_code=400, detail="Page ranges only apply to paginated sources (PDFs).")
+        raw = (req.page_range or "").strip()
+        if raw:
+            try:
+                parse_page_range(raw, max_page=page_count_for_content(_parsed_content_dict(src)))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            src.page_range = raw
+        else:
+            src.page_range = None
     db.commit()
     return source_to_response(src)
 
@@ -999,12 +1036,14 @@ def generate_bucket_test(
     all_chunks = []
     all_images = []
     for src in content_sources:
-        src_data = get_parsed_result(src)
+        src_data = _scoped_source_data(src)
         all_chunks.extend(fill_chunk_source_files(src_data.chunks, src.title))
         # Images embedded in the source PDFs travel with the chunks;
         # older uploads have none (images=[] by default).
         for img in (src_data.images or []):
             all_images.append(img.model_dump())
+    if not all_chunks:
+        raise HTTPException(status_code=400, detail="The selected pages contain no text to generate from. Widen the page range, or add more source material.")
     if all_images:
         print("[Generate] %d embedded source image(s) available as stimulus" % len(all_images))
 
@@ -1038,7 +1077,7 @@ def generate_bucket_test(
             flagged_text = ""
             for src in flagged_concepts_sources:
                 try:
-                    src_data = get_parsed_result(src)
+                    src_data = _scoped_source_data(src)
                     flagged_text += src_data.to_llm_context() + chr(10)
                 except Exception as e:
                     print("[Generate] Skipping unreadable concepts source %s: %s" % (getattr(src, "id", "?"), e))
@@ -1187,7 +1226,7 @@ def _topic_feedback_contexts(bucket):
                                 and getattr(src, "is_concepts_source", None)]
     all_chunks = []
     for src in content_sources:
-        src_data = get_parsed_result(src)
+        src_data = _scoped_source_data(src)
         all_chunks.extend(fill_chunk_source_files(src_data.chunks, src.title))
     composite = IngestionResult(
         source_title=bucket.title,
@@ -1197,7 +1236,7 @@ def _topic_feedback_contexts(bucket):
     )
     concepts_text = ""
     for src in flagged_concepts_sources:
-        src_data = get_parsed_result(src)
+        src_data = _scoped_source_data(src)
         concepts_text += "\n" + src_data.to_llm_context()
     return composite.to_llm_context(), concepts_text
 
