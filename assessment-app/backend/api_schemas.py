@@ -38,6 +38,10 @@ class SourceResponse(BaseModel):
     chunks: int = 0
     images: int = 0
     created_at: datetime
+    # True when this source reused an already-parsed upload;
+    # ingested_at is when that content was first parsed.
+    reused: bool = False
+    ingested_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -100,6 +104,8 @@ class ReferenceExampleResponse(BaseModel):
     source_url: Optional[str] = None
     chunks: int = 0
     created_at: datetime
+    reused: bool = False
+    ingested_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

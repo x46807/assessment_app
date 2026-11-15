@@ -22,6 +22,8 @@ interface ReferenceExample {
   source_url?: string | null;
   chunks: number;
   created_at: string;
+  reused?: boolean;
+  ingested_at?: string | null;
 }
 
 export default function ReferenceSets() {
@@ -34,6 +36,7 @@ export default function ReferenceSets() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [examples, setExamples] = useState<Record<string, ReferenceExample[]>>({});
   const [uploading, setUploading] = useState<Record<string, boolean>>({});
+  const [reingestingId, setReingestingId] = useState<string | null>(null);
   // Per-set choice for the next upload: example questions, or the
   // source material the questions were written about.
   const [uploadPurpose, setUploadPurpose] = useState<Record<string, "example" | "source">>({});
@@ -105,6 +108,19 @@ export default function ReferenceSets() {
       setError(err?.message || "Upload failed");
     } finally {
       setUploading((prev) => ({ ...prev, [setId]: false }));
+    }
+  };
+
+  const handleReingestExample = async (setId: string, exampleId: string) => {
+    setError("");
+    setReingestingId(exampleId);
+    try {
+      await apiFetch(`/api/reference-sets/${setId}/examples/${exampleId}/reingest`, { method: "POST" });
+      await loadExamples(setId);
+    } catch (err: any) {
+      setError(err?.message || "Could not re-ingest this link.");
+    } finally {
+      setReingestingId(null);
     }
   };
 
@@ -195,12 +211,17 @@ export default function ReferenceSets() {
                         <FileText className="h-4 w-4 text-slate-400 shrink-0" />
                         <span className="flex-1 min-w-0">
                           <span className="block truncate font-medium text-slate-800">{ex.title}</span>
-                          <span className="block text-xs text-slate-400">{ex.source_type} · {ex.chunks} chunk{ex.chunks === 1 ? "" : "s"}</span>
+                          <span className="block text-xs text-slate-400">{ex.source_type} · {ex.chunks} chunk{ex.chunks === 1 ? "" : "s"}{ex.reused ? ` · Reused — first ingested ${new Date(ex.ingested_at || ex.created_at).toLocaleDateString()}` : ""}</span>
                         </span>
                         {ex.purpose === "source" ? (
                           <span className="text-[11px] font-semibold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full shrink-0">Source material</span>
                         ) : (
                           <span className="text-[11px] font-semibold bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full shrink-0">Example questions</span>
+                        )}
+                        {ex.source_url && (
+                          <button onClick={() => handleReingestExample(s.id, ex.id)} disabled={reingestingId === ex.id} title="Re-fetch this link and refresh its stored content" className="text-xs font-semibold text-slate-500 hover:text-indigo-600 shrink-0 disabled:opacity-50">
+                            {reingestingId === ex.id ? "Re-ingesting…" : "Re-ingest"}
+                          </button>
                         )}
                         <button onClick={() => handleDeleteExample(s.id, ex.id)} aria-label="Delete example file" className="text-slate-400 hover:text-red-600 shrink-0">
                           <Trash2 className="h-4 w-4" />

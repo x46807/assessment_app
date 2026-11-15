@@ -1,7 +1,9 @@
+import json
 import os
 import re
 import shutil
 import time
+import uuid
 from datetime import datetime
 import tempfile
 from typing import List, Optional
@@ -9,7 +11,7 @@ from uuid import UUID
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from database import Base, engine, get_db
 import db_models
@@ -17,6 +19,7 @@ from auth import verify_google_token, create_access_token, get_current_user
 from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse, QuestionBankResponse, QuestionBankRename, SourceFlagRequest, AttemptCreate, AttemptResponse
 from feedback import FeedbackAnalyzer, DetailedFeedback
 from pipeline import MasterIngestionPipeline
+from dedup import PARSER_VERSION, hash_file_path, url_content_hash
 from generator import QuestionGeneratorEngine
 from classifier import SampleClassifier, KeyConceptExtractor
 from models import IngestionResult
@@ -66,6 +69,21 @@ try:
 except Exception as _e:  # noqa: BLE001 - startup must not fail on this
     print(f"[Startup] Could not ensure generated_questions.detailed_feedback column: {_e}")
 
+# Existing databases were created before sources gained a shared
+# parsed-content store (upload dedup). The parsed_sources table
+# itself is created by create_all(); the per-row columns and the
+# relaxed NOT NULL on extracted_content need explicit ALTERs.
+try:
+    with engine.begin() as _conn:
+        _conn.execute(text("ALTER TABLE topic_sources ADD COLUMN IF NOT EXISTS parsed_source_id UUID"))
+        _conn.execute(text("ALTER TABLE topic_sources ADD COLUMN IF NOT EXISTS reused BOOLEAN NOT NULL DEFAULT FALSE"))
+        _conn.execute(text("ALTER TABLE topic_sources ALTER COLUMN extracted_content DROP NOT NULL"))
+        _conn.execute(text("ALTER TABLE reference_examples ADD COLUMN IF NOT EXISTS parsed_source_id UUID"))
+        _conn.execute(text("ALTER TABLE reference_examples ADD COLUMN IF NOT EXISTS reused BOOLEAN NOT NULL DEFAULT FALSE"))
+        _conn.execute(text("ALTER TABLE reference_examples ALTER COLUMN extracted_content DROP NOT NULL"))
+except Exception as _e:  # noqa: BLE001 - startup must not fail on this
+    print(f"[Startup] Could not ensure dedup columns: {_e}")
+
 
 def normalize_purpose(purpose):
     """Return 'source' or 'example'; anything else is a client error."""
@@ -100,7 +118,7 @@ def build_example_style(example_sources, label=None, source_sources=None):
     example_text = ""
     for src in example_sources:
         try:
-            src_data = IngestionResult.model_validate(src.extracted_content)
+            src_data = get_parsed_result(src)
             example_text += src_data.to_llm_context() + chr(10)
         except Exception as e:
             print("[ExampleStyle] Skipping unreadable example source %s: %s" % (getattr(src, "id", "?"), e))
@@ -116,7 +134,7 @@ def build_example_style(example_sources, label=None, source_sources=None):
         source_text = ""
         for src in source_sources:
             try:
-                src_data = IngestionResult.model_validate(src.extracted_content)
+                src_data = get_parsed_result(src)
                 source_text += src_data.to_llm_context() + chr(10)
             except Exception as e:
                 print("[ExampleStyle] Skipping unreadable source file %s: %s" % (getattr(src, "id", "?"), e))
@@ -193,12 +211,130 @@ def get_bucket_or_404(db, bucket_id, user_id):
     return bucket
 
 
+# --- Upload dedup: the shared parsed-content store ---
+
+def _shared_row_for(row):
+    """The ParsedSource a source/example row references, or None
+    (pre-dedup rows have no reference). Uses the row's own
+    session, so callers do not need to pass one."""
+    shared_id = getattr(row, "parsed_source_id", None)
+    if not shared_id:
+        return None
+    session = object_session(row)
+    if session is None:
+        return None
+    return session.query(db_models.ParsedSource).filter(
+        db_models.ParsedSource.id == shared_id).first()
+
+
+def _parsed_content_dict(row):
+    """The stored parse (as a plain dict) for a source/example
+    row: from the shared store when it has one, else the row's
+    own extracted_content (pre-dedup rows)."""
+    shared = _shared_row_for(row)
+    if shared is not None and shared.parsed_content:
+        return shared.parsed_content
+    return getattr(row, "extracted_content", None) or {}
+
+
+def get_parsed_result(row):
+    """The IngestionResult for a source/example row, resolved
+    through the shared store when it has one."""
+    content = _parsed_content_dict(row)
+    if not content:
+        raise ValueError("Source %s has no stored content." % getattr(row, "id", "?"))
+    return IngestionResult.model_validate(content)
+
+
+def _source_content_info(row):
+    """(content dict, reused, ingested_at) for a source/example
+    row, for list responses. ingested_at is when the content was
+    first parsed; for pre-dedup rows it is the row's own date."""
+    shared = _shared_row_for(row)
+    if shared is not None and shared.parsed_content:
+        return shared.parsed_content, bool(getattr(row, "reused", False)), shared.created_at
+    content = getattr(row, "extracted_content", None) or {}
+    return content, False, getattr(row, "created_at", None)
+
+
+def _lookup_shared_parse(db, user_id, kind, content_hash):
+    return db.query(db_models.ParsedSource).filter(
+        db_models.ParsedSource.user_id == user_id,
+        db_models.ParsedSource.kind == kind,
+        db_models.ParsedSource.content_hash == content_hash,
+    ).first()
+
+
+def _touch_shared_parse(db, shared_id):
+    db.query(db_models.ParsedSource).filter(
+        db_models.ParsedSource.id == shared_id).update(
+        {"last_used_at": datetime.utcnow()}, synchronize_session=False)
+
+
+def _store_shared_parse(db, user_id, kind, content_hash, title, result):
+    """Insert the parse into the shared store, or refresh the
+    existing row for this content (a parser upgrade re-parses
+    the same bytes into the same row). Atomic upsert; the
+    caller's commit persists it. Returns the shared row id."""
+    row_id = db.execute(text(
+        "INSERT INTO parsed_sources (id, user_id, kind, content_hash, title, parsed_content, parser_version, created_at, last_used_at) "
+        "VALUES (:id, :user_id, :kind, :content_hash, :title, :parsed_content::jsonb, :parser_version, NOW(), NOW()) "
+        "ON CONFLICT (user_id, kind, content_hash) DO UPDATE SET "
+        "parsed_content = EXCLUDED.parsed_content, parser_version = EXCLUDED.parser_version, "
+        "title = EXCLUDED.title, last_used_at = NOW() "
+        "RETURNING id"
+    ), {
+        "id": uuid.uuid4(),
+        "user_id": user_id,
+        "kind": kind,
+        "content_hash": content_hash,
+        "title": title,
+        "parsed_content": json.dumps(result.model_dump(), default=str),
+        "parser_version": PARSER_VERSION,
+    }).scalar_one()
+    return row_id
+
+
+def _get_or_parse_file(db, user_id, tmp_path, title):
+    """Hash the file; reuse the shared parse when it is current,
+    else parse and store it. Returns (result, reused, shared_id).
+    A dedup lookup failure must never block an upload, so callers
+    treat a lookup error as a miss by catching it here."""
+    try:
+        content_hash = hash_file_path(tmp_path)
+        shared = _lookup_shared_parse(db, user_id, "file", content_hash)
+        if shared is not None and shared.parser_version == PARSER_VERSION:
+            _touch_shared_parse(db, shared.id)
+            return IngestionResult.model_validate(shared.parsed_content), True, shared.id
+    except Exception as e:  # noqa: BLE001 - dedup must fail open
+        print(f"[Dedup] File lookup failed, parsing as usual: {e}")
+        content_hash = hash_file_path(tmp_path)
+    result = ingestion_pipeline.ingest_file(tmp_path, title=title)
+    return result, False, _store_shared_parse(db, user_id, "file", content_hash, title, result)
+
+
+def _get_or_parse_url(db, user_id, url, title):
+    """Same as _get_or_parse_file, for links: identity is the
+    normalized URL. Returns (result, reused, shared_id)."""
+    content_hash = url_content_hash(url)
+    try:
+        shared = _lookup_shared_parse(db, user_id, "url", content_hash)
+        if shared is not None and shared.parser_version == PARSER_VERSION:
+            _touch_shared_parse(db, shared.id)
+            return IngestionResult.model_validate(shared.parsed_content), True, shared.id
+    except Exception as e:  # noqa: BLE001 - dedup must fail open
+        print(f"[Dedup] URL lookup failed, ingesting as usual: {e}")
+    result = ingestion_pipeline.ingest_url(url, title=title)
+    return result, False, _store_shared_parse(db, user_id, "url", content_hash, title, result)
+
+
 def source_to_response(source):
+    content, reused, ingested_at = _source_content_info(source)
     chunks = 0
     images = 0
     try:
-        chunks = int((source.extracted_content or {}).get("total_chunks", 0))
-        images = len((source.extracted_content or {}).get("images", []) or [])
+        chunks = int((content or {}).get("total_chunks", 0))
+        images = len((content or {}).get("images", []) or [])
     except Exception:  # noqa: BLE001 - malformed stored content must not break listing
         chunks = 0
         images = 0
@@ -212,6 +348,8 @@ def source_to_response(source):
         chunks=chunks,
         images=images,
         created_at=source.created_at,
+        reused=reused,
+        ingested_at=ingested_at,
     )
 
 app = FastAPI(title="Psychometric Assessment Generation API")
@@ -312,17 +450,19 @@ def ingest_file_to_bucket(
         tmp_path = tmp.name
 
     try:
-        result = ingestion_pipeline.ingest_file(tmp_path, title=title or file.filename)
+        result, reused, shared_id = _get_or_parse_file(db, current_user.id, tmp_path, title or file.filename)
         source_record = db_models.TopicSource(
             bucket_id=bucket.id,
             source_type=result.source_type,
-            title=result.source_title,
+            title=title or result.source_title,
             purpose=purpose,
-            extracted_content=result.model_dump()
+            parsed_source_id=shared_id,
+            reused=reused,
+            extracted_content=None,
         )
         db.add(source_record)
         db.commit()
-        return {"status": "success", "source_id": str(source_record.id), "chunks": result.total_chunks, "purpose": purpose}
+        return {"status": "success", "source_id": str(source_record.id), "chunks": result.total_chunks, "purpose": purpose, "reused": reused}
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -340,21 +480,53 @@ def ingest_url_to_bucket(
     purpose = normalize_purpose(purpose)
 
     try:
-        result = ingestion_pipeline.ingest_url(url, title=title)
+        result, reused, shared_id = _get_or_parse_url(db, current_user.id, url, title)
     except Exception as e:
         print("[IngestURL] FAILED url=%s: %s: %s" % (url, type(e).__name__, e))
         raise HTTPException(status_code=502, detail="Could not ingest this link: %s" % str(e)[:300])
     source_record = db_models.TopicSource(
         bucket_id=bucket.id,
         source_type=result.source_type,
-        title=result.source_title,
+        title=title or result.source_title,
         purpose=purpose,
         source_url=url,
-        extracted_content=result.model_dump()
+        parsed_source_id=shared_id,
+        reused=reused,
+        extracted_content=None,
     )
     db.add(source_record)
     db.commit()
-    return {"status": "success", "source_id": str(source_record.id), "chunks": result.total_chunks, "purpose": purpose}
+    return {"status": "success", "source_id": str(source_record.id), "chunks": result.total_chunks, "purpose": purpose, "reused": reused}
+
+
+@app.post("/api/buckets/{bucket_id}/sources/{source_id}/reingest", response_model=SourceResponse)
+def reingest_bucket_source(bucket_id: UUID, source_id: UUID, current_user: db_models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Re-fetch a link source and refresh its stored parse.
+    Only links can be re-ingested: a file's bytes never change,
+    so re-uploading it either reuses the current parse or, after
+    a parser upgrade, re-parses it automatically."""
+    bucket = get_bucket_or_404(db, bucket_id, current_user.id)
+    src = db.query(db_models.TopicSource).filter(
+        db_models.TopicSource.id == source_id,
+        db_models.TopicSource.bucket_id == bucket.id,
+    ).first()
+    if not src:
+        raise HTTPException(status_code=404, detail="Source not found.")
+    if not src.source_url:
+        raise HTTPException(status_code=400, detail="Only links can be re-ingested. To refresh a file, upload it again.")
+    try:
+        result = ingestion_pipeline.ingest_url(src.source_url, title=src.title)
+    except Exception as e:
+        print("[Reingest] FAILED url=%s: %s: %s" % (src.source_url, type(e).__name__, e))
+        raise HTTPException(status_code=502, detail="Could not re-ingest this link: %s" % str(e)[:300])
+    shared_id = _store_shared_parse(db, current_user.id, "url", url_content_hash(src.source_url), src.title, result)
+    src.parsed_source_id = shared_id
+    src.source_type = result.source_type
+    src.reused = False
+    src.extracted_content = None
+    db.commit()
+    db.refresh(src)
+    return source_to_response(src)
 
 
 @app.post("/api/buckets/{bucket_id}/sources/files")
@@ -380,19 +552,21 @@ def ingest_files_to_bucket(
             shutil.copyfileobj(upload.file, tmp)
             tmp_path = tmp.name
         try:
-            result = ingestion_pipeline.ingest_file(tmp_path, title=filename)
+            result, reused, shared_id = _get_or_parse_file(db, current_user.id, tmp_path, filename)
             source_record = db_models.TopicSource(
                 bucket_id=bucket.id,
                 source_type=result.source_type,
                 title=result.source_title,
                 purpose=purpose,
-                extracted_content=result.model_dump()
+                parsed_source_id=shared_id,
+                reused=reused,
+                extracted_content=None,
             )
             db.add(source_record)
             db.commit()
             results.append({"filename": filename, "status": "success",
                             "source_id": str(source_record.id),
-                            "chunks": result.total_chunks, "purpose": purpose})
+                            "chunks": result.total_chunks, "purpose": purpose, "reused": reused})
         except Exception as exc:  # noqa: BLE001 - per-file failure must not abort the batch
             db.rollback()
             results.append({"filename": filename, "status": "error", "detail": str(exc)})
@@ -466,9 +640,10 @@ def reference_set_to_response(ref_set):
 
 
 def reference_example_to_response(ex):
+    content, reused, ingested_at = _source_content_info(ex)
     chunks = 0
     try:
-        chunks = int((ex.extracted_content or {}).get("total_chunks", 0))
+        chunks = int((content or {}).get("total_chunks", 0))
     except Exception:  # noqa: BLE001 - malformed stored content must not break listing
         chunks = 0
     return ReferenceExampleResponse(
@@ -479,6 +654,8 @@ def reference_example_to_response(ex):
         source_url=ex.source_url,
         chunks=chunks,
         created_at=ex.created_at,
+        reused=reused,
+        ingested_at=ingested_at,
     )
 
 
@@ -545,19 +722,21 @@ def ingest_files_to_reference_set(
             shutil.copyfileobj(upload.file, tmp)
             tmp_path = tmp.name
         try:
-            result = ingestion_pipeline.ingest_file(tmp_path, title=filename)
+            result, reused, shared_id = _get_or_parse_file(db, current_user.id, tmp_path, filename)
             example_record = db_models.ReferenceExample(
                 reference_set_id=ref_set.id,
                 purpose=purpose,
                 source_type=result.source_type,
                 title=result.source_title,
-                extracted_content=result.model_dump()
+                parsed_source_id=shared_id,
+                reused=reused,
+                extracted_content=None,
             )
             db.add(example_record)
             db.commit()
             results.append({"filename": filename, "status": "success",
                             "source_id": str(example_record.id),
-                            "chunks": result.total_chunks})
+                            "chunks": result.total_chunks, "reused": reused})
         except Exception as exc:  # noqa: BLE001 - per-file failure must not abort the batch
             db.rollback()
             results.append({"filename": filename, "status": "error", "detail": str(exc)})
@@ -579,7 +758,7 @@ def ingest_url_to_reference_set(
     ref_set = get_reference_set_or_404(db, set_id, current_user.id)
     purpose = normalize_purpose(purpose)
     try:
-        result = ingestion_pipeline.ingest_url(url, title=title)
+        result, reused, shared_id = _get_or_parse_url(db, current_user.id, url, title)
     except Exception as e:
         print("[IngestURL] FAILED url=%s: %s: %s" % (url, type(e).__name__, e))
         raise HTTPException(status_code=502, detail="Could not ingest this link: %s" % str(e)[:300])
@@ -587,13 +766,44 @@ def ingest_url_to_reference_set(
         reference_set_id=ref_set.id,
         purpose=purpose,
         source_type=result.source_type,
-        title=result.source_title,
+        title=title or result.source_title,
         source_url=url,
-        extracted_content=result.model_dump()
+        parsed_source_id=shared_id,
+        reused=reused,
+        extracted_content=None,
     )
     db.add(example_record)
     db.commit()
-    return {"status": "success", "source_id": str(example_record.id), "chunks": result.total_chunks}
+    return {"status": "success", "source_id": str(example_record.id), "chunks": result.total_chunks, "reused": reused}
+
+
+@app.post("/api/reference-sets/{set_id}/examples/{example_id}/reingest", response_model=ReferenceExampleResponse)
+def reingest_reference_example(set_id: UUID, example_id: UUID, current_user: db_models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Re-fetch a link example and refresh its stored parse.
+    Only links can be re-ingested; files are refreshed by
+    re-uploading them."""
+    ref_set = get_reference_set_or_404(db, set_id, current_user.id)
+    ex = db.query(db_models.ReferenceExample).filter(
+        db_models.ReferenceExample.id == example_id,
+        db_models.ReferenceExample.reference_set_id == ref_set.id,
+    ).first()
+    if not ex:
+        raise HTTPException(status_code=404, detail="Example not found.")
+    if not ex.source_url:
+        raise HTTPException(status_code=400, detail="Only links can be re-ingested. To refresh a file, upload it again.")
+    try:
+        result = ingestion_pipeline.ingest_url(ex.source_url, title=ex.title)
+    except Exception as e:
+        print("[Reingest] FAILED url=%s: %s: %s" % (ex.source_url, type(e).__name__, e))
+        raise HTTPException(status_code=502, detail="Could not re-ingest this link: %s" % str(e)[:300])
+    shared_id = _store_shared_parse(db, current_user.id, "url", url_content_hash(ex.source_url), ex.title, result)
+    ex.parsed_source_id = shared_id
+    ex.source_type = result.source_type
+    ex.reused = False
+    ex.extracted_content = None
+    db.commit()
+    db.refresh(ex)
+    return reference_example_to_response(ex)
 
 
 @app.delete("/api/reference-sets/{set_id}/examples/{example_id}")
@@ -789,7 +999,7 @@ def generate_bucket_test(
     all_chunks = []
     all_images = []
     for src in content_sources:
-        src_data = IngestionResult.model_validate(src.extracted_content)
+        src_data = get_parsed_result(src)
         all_chunks.extend(fill_chunk_source_files(src_data.chunks, src.title))
         # Images embedded in the source PDFs travel with the chunks;
         # older uploads have none (images=[] by default).
@@ -828,7 +1038,7 @@ def generate_bucket_test(
             flagged_text = ""
             for src in flagged_concepts_sources:
                 try:
-                    src_data = IngestionResult.model_validate(src.extracted_content)
+                    src_data = get_parsed_result(src)
                     flagged_text += src_data.to_llm_context() + chr(10)
                 except Exception as e:
                     print("[Generate] Skipping unreadable concepts source %s: %s" % (getattr(src, "id", "?"), e))
@@ -977,7 +1187,7 @@ def _topic_feedback_contexts(bucket):
                                 and getattr(src, "is_concepts_source", None)]
     all_chunks = []
     for src in content_sources:
-        src_data = IngestionResult.model_validate(src.extracted_content)
+        src_data = get_parsed_result(src)
         all_chunks.extend(fill_chunk_source_files(src_data.chunks, src.title))
     composite = IngestionResult(
         source_title=bucket.title,
@@ -987,7 +1197,7 @@ def _topic_feedback_contexts(bucket):
     )
     concepts_text = ""
     for src in flagged_concepts_sources:
-        src_data = IngestionResult.model_validate(src.extracted_content)
+        src_data = get_parsed_result(src)
         concepts_text += "\n" + src_data.to_llm_context()
     return composite.to_llm_context(), concepts_text
 

@@ -19,6 +19,8 @@ interface SourceItem {
   chunks: number;
   images?: number;
   created_at: string;
+  reused?: boolean;
+  ingested_at?: string | null;
 }
 
 interface ReferenceSet {
@@ -41,6 +43,7 @@ interface UploadResult {
   purpose: Purpose;
   status: "success" | "error";
   detail?: string;
+  reused?: boolean;
 }
 
 const PURPOSE_LABEL: Record<Purpose, string> = {
@@ -85,6 +88,8 @@ export default function BucketWorkspace() {
   const [injectStimulus, setInjectStimulus] = useState(false);
   const [conceptualUnderstanding, setConceptualUnderstanding] = useState(false);
   const [sourceFlagError, setSourceFlagError] = useState("");
+  const [reingestError, setReingestError] = useState("");
+  const [reingestingId, setReingestingId] = useState<string | null>(null);
   // "topic": this topic's own example questions (current behaviour).
   // "none": ignore examples, the typology picker decides the type.
   // Otherwise a reference-set id: use that set's examples as the style.
@@ -226,12 +231,12 @@ export default function BucketWorkspace() {
       formData.append("purpose", purpose);
       try {
         const data = await apiFetch(`/api/buckets/${id}/sources/files`, { method: "POST", body: formData });
-        const byName = new Map<string, { status: string; detail?: string }>();
+        const byName = new Map<string, { status: string; detail?: string; reused?: boolean }>();
         (data.results || []).forEach((r: any) => byName.set(r.filename, r));
         groupFiles.forEach((file) => {
           const r = byName.get(file.name);
           if (r && r.status === "success") {
-            results.push({ name: file.name, purpose, status: "success" });
+            results.push({ name: file.name, purpose, status: "success", reused: r.reused });
           } else {
             results.push({ name: file.name, purpose, status: "error", detail: (r && r.detail) || "Upload failed" });
             remainingFiles.push(file);
@@ -278,6 +283,19 @@ export default function BucketWorkspace() {
       );
     } finally {
       setUploading(false);
+    }
+  };
+
+  const reingestSource = async (source: SourceItem) => {
+    setReingestError("");
+    setReingestingId(source.id);
+    try {
+      const updated = await apiFetch(`/api/buckets/${id}/sources/${source.id}/reingest`, { method: "POST" });
+      setSources((prev) => prev.map((s) => (s.id === source.id ? updated : s)));
+    } catch (err: any) {
+      setReingestError(err?.message || "Could not re-ingest this link.");
+    } finally {
+      setReingestingId(null);
     }
   };
 
@@ -435,7 +453,7 @@ export default function BucketWorkspace() {
                   <li key={r.name + "-" + i} className={`flex items-start gap-2 text-xs ${r.status === "success" ? "text-emerald-700" : "text-red-700"}`}>
                     {r.status === "success" ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <XCircle className="h-4 w-4 shrink-0" />}
                     <span>
-                      {r.status === "success" ? "Ingested" : "Failed"}: {r.name} ({PURPOSE_LABEL[r.purpose]})
+                      {r.status === "success" ? (r.reused ? "Reused" : "Ingested") : "Failed"}: {r.name} ({PURPOSE_LABEL[r.purpose]})
                       {r.detail ? ` — ${r.detail}` : ""}
                     </span>
                   </li>
@@ -472,6 +490,7 @@ export default function BucketWorkspace() {
             </div>
             <p className="text-xs text-slate-500 mb-4">Everything ingested into this topic, with what each file is used for. Questions are generated from source material only. Flag a source — e.g. a course outline or summary slides — as holding the key concepts, and generation can test understanding of them.</p>
             {sourceFlagError && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-4">{sourceFlagError}</p>}
+            {reingestError && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-4">{reingestError}</p>}
             {loadingSources ? (
               <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-indigo-600" /></div>
             ) : sources.length === 0 ? (
@@ -487,6 +506,7 @@ export default function BucketWorkspace() {
                         {s.source_type} · {s.chunks} chunk{s.chunks === 1 ? "" : "s"}
                         {(s.images ?? 0) > 0 ? ` · ${s.images} image${s.images === 1 ? "" : "s"} extracted` : ""}
                         {s.source_url ? ` · ${s.source_url}` : ""} · {new Date(s.created_at).toLocaleDateString()}
+                        {s.reused ? ` · Reused — first ingested ${new Date(s.ingested_at || s.created_at).toLocaleDateString()}` : ""}
                       </span>
                     </span>
                     <span className={`text-xs font-semibold px-2 py-1 rounded-full shrink-0 ${s.purpose === "example" ? "bg-amber-100 text-amber-800" : "bg-indigo-100 text-indigo-800"}`}>
@@ -499,6 +519,16 @@ export default function BucketWorkspace() {
                         className={`text-xs font-semibold px-2 py-1 rounded-full shrink-0 ${s.is_concepts_source ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-200" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
                       >
                         {s.is_concepts_source ? "Key concepts ✓" : "Mark as key concepts"}
+                      </button>
+                    )}
+                    {s.source_url && (
+                      <button
+                        onClick={() => reingestSource(s)}
+                        disabled={reingestingId === s.id}
+                        title="Re-fetch this link and refresh its stored content"
+                        className="text-xs font-semibold px-2 py-1 rounded-full shrink-0 bg-slate-100 text-slate-600 hover:bg-slate-200 disabled:opacity-50"
+                      >
+                        {reingestingId === s.id ? "Re-ingesting…" : "Re-ingest"}
                       </button>
                     )}
                   </li>

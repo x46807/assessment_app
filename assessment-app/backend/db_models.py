@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean, Float
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean, Float, Integer, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from database import Base
@@ -32,6 +32,38 @@ class TopicBucket(Base):
     generated_items = relationship("GeneratedQuestionItem", back_populates="bucket", cascade="all, delete-orphan")
     banks = relationship("QuestionBank", back_populates="bucket", cascade="all, delete-orphan")
 
+class ParsedSource(Base):
+    """One parsed upload, stored once per user per unique content --
+    the shared store behind upload dedup. Keyed by (user_id, kind,
+    content_hash): a file by the SHA-256 of its bytes, a link by
+    the SHA-256 of its normalized URL. TopicSource and
+    ReferenceExample rows reference it via parsed_source_id and
+    keep their own title, purpose and bucket; deleting a source
+    never deletes the shared row, so a parse is never pulled out
+    from under another source that references it. Rows created
+    before dedup have parsed_source_id NULL and keep their own
+    extracted_content; the resolver falls back to it. Old parses
+    are never backfilled -- their original bytes are gone, so
+    only the parsed content could be hashed, which is not the
+    same identity. parser_version records which parser produced
+    the stored parse; a mismatch means re-parse, never reuse."""
+    __tablename__ = "parsed_sources"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(String(20), nullable=False)  # "file" | "url"
+    content_hash = Column(String(64), nullable=False)
+    title = Column(String(255), nullable=False)
+    parsed_content = Column(JSONB, nullable=False)
+    parser_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "kind", "content_hash", name="uq_parsed_source_user_kind_hash"),
+    )
+
+
 class TopicSource(Base):
     __tablename__ = "topic_sources"
 
@@ -50,7 +82,14 @@ class TopicSource(Base):
     # content.
     is_concepts_source = Column(Boolean, nullable=False, default=False, server_default="false")
     source_url = Column(Text, nullable=True)
-    extracted_content = Column(JSONB, nullable=False)
+    # The shared parse for this content, when the upload went
+    # through dedup. NULL for rows created before dedup (their
+    # parsed content lives in extracted_content instead).
+    parsed_source_id = Column(UUID(as_uuid=True), ForeignKey("parsed_sources.id", ondelete="SET NULL"), nullable=True)
+    # True when this row reused an existing shared parse instead
+    # of parsing the upload itself.
+    reused = Column(Boolean, nullable=False, default=False, server_default="false")
+    extracted_content = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     bucket = relationship("TopicBucket", back_populates="sources")
@@ -107,7 +146,9 @@ class ReferenceExample(Base):
     source_type = Column(String(50), nullable=False)
     title = Column(String(255), nullable=False)
     source_url = Column(Text, nullable=True)
-    extracted_content = Column(JSONB, nullable=False)
+    parsed_source_id = Column(UUID(as_uuid=True), ForeignKey("parsed_sources.id", ondelete="SET NULL"), nullable=True)
+    reused = Column(Boolean, nullable=False, default=False, server_default="false")
+    extracted_content = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     reference_set = relationship("ReferenceSet", back_populates="examples")
