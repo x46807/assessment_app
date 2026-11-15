@@ -26,6 +26,33 @@ class TopicBucketResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class TopicShareCreate(BaseModel):
+    email: str
+
+
+class TopicShareResponse(BaseModel):
+    id: UUID
+    bucket_id: UUID
+    shared_with_email: str
+    created_at: datetime
+
+
+class SharedTopicResponse(BaseModel):
+    """One topic shared with the current user, for the dashboard's
+    "Shared topics" section. Counts only -- no attempt or
+    evaluation data of the owner ever leaves the server."""
+    id: UUID
+    title: str
+    description: Optional[str]
+    owner_name: Optional[str]
+    owner_email: str
+    source_count: int = 0
+    bank_count: int = 0
+    question_count: int = 0
+    shared_at: datetime
+    created_at: datetime
+
+
 class SourceResponse(BaseModel):
     id: UUID
     title: str
@@ -60,6 +87,22 @@ class QuestionBankResponse(BaseModel):
     title: str
     created_at: datetime
     question_count: int = 0
+
+
+class SharedTopicDetailResponse(BaseModel):
+    """A shared topic opened read-only: its sources and banks.
+    Sources carry metadata only (SourceResponse has no extracted
+    text); the recipient takes quizzes from the banks and can
+    clone the whole topic into their own library."""
+    id: UUID
+    title: str
+    description: Optional[str]
+    owner_name: Optional[str]
+    owner_email: str
+    shared_at: datetime
+    created_at: datetime
+    sources: List[SourceResponse] = []
+    banks: List[QuestionBankResponse] = []
 
 
 class QuestionBankRename(BaseModel):

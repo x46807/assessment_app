@@ -2,14 +2,19 @@
 
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import ReferenceSets from "@/components/ReferenceSets";
-import { FolderPlus, Layers, ArrowRight, Loader2 } from "lucide-react";
+import { FolderPlus, Layers, ArrowRight, Loader2, Copy } from "lucide-react";
 
 export default function Dashboard() {
   const { user, apiFetch } = useAuth();
+  const router = useRouter();
   const [buckets, setBuckets] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [sharedTopics, setSharedTopics] = useState<any[]>([]);
+  const [cloningId, setCloningId] = useState<string | null>(null);
+  const [sharedError, setSharedError] = useState("");
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -17,10 +22,24 @@ export default function Dashboard() {
   useEffect(() => {
     if (user) {
       apiFetch("/api/buckets").then(setBuckets).finally(() => setLoading(false));
+      apiFetch("/api/shared-topics").then(setSharedTopics).catch(() => setSharedTopics([]));
     } else {
       setLoading(false);
     }
   }, [user]);
+
+  const cloneShared = async (sharedId: string) => {
+    setSharedError("");
+    setCloningId(sharedId);
+    try {
+      const created = await apiFetch(`/api/shared-topics/${sharedId}/clone`, { method: "POST" });
+      router.push(`/bucket/${created.id}`);
+    } catch (err: any) {
+      setSharedError(err?.message || "Could not clone this topic");
+    } finally {
+      setCloningId(null);
+    }
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -80,6 +99,32 @@ export default function Dashboard() {
               </div>
             </Link>
           ))}
+        </div>
+      )}
+
+      {sharedTopics.length > 0 && (
+        <div className="mt-12">
+          <h2 className="text-lg font-bold text-slate-900">Shared topics</h2>
+          <p className="text-sm text-slate-500 mt-1">Topics others have shared with you. Read-only — take the quizzes, or clone a topic into your own library to change it.</p>
+          {sharedError && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mt-4">{sharedError}</p>}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 mt-6">
+            {sharedTopics.map((t) => (
+              <div key={t.id} className="bg-white rounded-xl border border-slate-200 p-6 hover:border-indigo-500 hover:shadow-md transition-all group">
+                <h3 className="font-semibold text-lg text-slate-900 group-hover:text-indigo-600">{t.title}</h3>
+                <p className="text-sm text-slate-500 mt-2">Shared by {t.owner_name || t.owner_email}</p>
+                <div className="flex justify-between text-xs text-slate-500 border-t border-slate-100 pt-4 mt-4">
+                  <span>{t.source_count} Sources</span>
+                  <span>{t.bank_count} Banks · {t.question_count} Questions</span>
+                </div>
+                <div className="flex items-center gap-2 mt-4">
+                  <Link href={`/shared/${t.id}`} className="flex-1 text-center text-sm font-semibold px-3 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">Open</Link>
+                  <button onClick={() => cloneShared(t.id)} disabled={cloningId === t.id} className="flex items-center gap-1 text-sm font-semibold px-3 py-2 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-50">
+                    <Copy className="h-4 w-4" /> {cloningId === t.id ? "Cloning..." : "Clone"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, object_session
 from database import Base, engine, get_db
 import db_models
 from auth import verify_google_token, create_access_token, get_current_user
-from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse, QuestionBankResponse, QuestionBankRename, SourceFlagRequest, AttemptCreate, AttemptResponse
+from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse, QuestionBankResponse, QuestionBankRename, SourceFlagRequest, AttemptCreate, AttemptResponse, TopicShareCreate, TopicShareResponse, SharedTopicResponse, SharedTopicDetailResponse
 from feedback import FeedbackAnalyzer, DetailedFeedback
 from pipeline import MasterIngestionPipeline
 from dedup import PARSER_VERSION, hash_file_path, url_content_hash
@@ -211,6 +211,87 @@ def get_bucket_or_404(db, bucket_id, user_id):
     if not bucket:
         raise HTTPException(status_code=404, detail="Topic bucket not found.")
     return bucket
+
+
+# --- Topic sharing: share by email, read-only + take quizzes ---
+
+def normalize_share_email(email):
+    """Lowercase + strip; raises ValueError when it is not an
+    email address. Sharing matches on the address the
+    recipient signs in with, so the share works even when
+    it was created before they ever had an account."""
+    address = (email or "").strip().lower()
+    if "@" not in address or address.startswith("@") or address.endswith("@"):
+        raise ValueError("Enter a valid email address.")
+    domain = address.rsplit("@", 1)[1]
+    if "." not in domain or not domain.strip("."):
+        raise ValueError("Enter a valid email address.")
+    return address
+
+
+def _get_share(db, bucket_id, user):
+    """The share giving this user access to a topic they do
+    not own, or None."""
+    email = (getattr(user, "email", None) or "").strip().lower()
+    if not email:
+        return None
+    return db.query(db_models.TopicShare).filter(
+        db_models.TopicShare.bucket_id == bucket_id,
+        db_models.TopicShare.shared_with_email == email,
+    ).first()
+
+
+def _get_owned_or_shared_bucket(db, bucket_id, user):
+    """(bucket, is_owner) for a topic the user owns or has
+    been shared. Shared access covers reading the topic and
+    taking its quizzes; every mutating endpoint still
+    requires ownership. The 404 is the same whether the
+    topic does not exist or is not shared with the caller."""
+    bucket = db.query(db_models.TopicBucket).filter(
+        db_models.TopicBucket.id == bucket_id,
+    ).first()
+    if not bucket:
+        raise HTTPException(status_code=404, detail="Topic bucket not found.")
+    if bucket.user_id == user.id:
+        return bucket, True
+    if _get_share(db, bucket_id, user) is not None:
+        return bucket, False
+    raise HTTPException(status_code=404, detail="Topic bucket not found.")
+
+
+def _get_shared_bucket_or_404(db, bucket_id, user):
+    """(bucket, share) for a topic shared with this user.
+    The owner is NOT served here -- they use their own
+    bucket endpoints."""
+    bucket = db.query(db_models.TopicBucket).filter(
+        db_models.TopicBucket.id == bucket_id,
+    ).first()
+    if not bucket:
+        raise HTTPException(status_code=404, detail="Topic bucket not found.")
+    share = _get_share(db, bucket_id, user)
+    if share is None:
+        raise HTTPException(status_code=404, detail="Topic bucket not found.")
+    return bucket, share
+
+
+def _clone_source_parse(db, user, src):
+    """(parsed_source_id, reused, extracted_content) for a
+    cloned source: the parse is copied into the
+    recipient's own shared store under the same identity,
+    so their store stays consistent and a later re-upload
+    of the same file reuses it. Pre-dedup rows have no
+    shared row, so their content is copied inline (the
+    resolver's existing fallback)."""
+    shared = _shared_row_for(src)
+    if shared is not None and shared.parsed_content:
+        existing = _lookup_shared_parse(db, user.id, shared.kind, shared.content_hash)
+        if existing is not None and existing.parser_version == PARSER_VERSION:
+            _touch_shared_parse(db, existing.id)
+            return existing.id, True, None
+        result = IngestionResult.model_validate(shared.parsed_content)
+        new_id = _store_shared_parse(db, user.id, shared.kind, shared.content_hash, src.title, result)
+        return new_id, False, None
+    return None, False, getattr(src, "extracted_content", None)
 
 
 # --- Upload dedup: the shared parsed-content store ---
@@ -975,6 +1056,240 @@ def delete_bank(
     return {"status": "deleted"}
 
 
+# --- Topic sharing ---
+
+@app.get("/api/shared-topics", response_model=List[SharedTopicResponse])
+def list_shared_topics(
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Topics others have shared with the current user, for the
+    dashboard's "Shared topics" section. Counts only -- no attempt
+    or evaluation data of the owner ever leaves the server."""
+    email = (getattr(current_user, "email", None) or "").strip().lower()
+    shares = db.query(db_models.TopicShare).filter(
+        db_models.TopicShare.shared_with_email == email
+    ).order_by(db_models.TopicShare.created_at.desc()).all()
+    results = []
+    for share in shares:
+        bucket = share.bucket
+        if bucket is None:
+            continue
+        owner = db.query(db_models.User).filter(
+            db_models.User.id == bucket.user_id).first()
+        results.append(SharedTopicResponse(
+            id=bucket.id,
+            title=bucket.title,
+            description=bucket.description,
+            owner_name=owner.full_name if owner else None,
+            owner_email=owner.email if owner else "",
+            source_count=len(bucket.sources),
+            bank_count=len(bucket.banks),
+            question_count=len(bucket.generated_items),
+            shared_at=share.created_at,
+            created_at=bucket.created_at,
+        ))
+    return results
+
+
+@app.get("/api/shared-topics/{bucket_id}", response_model=SharedTopicDetailResponse)
+def get_shared_topic(
+    bucket_id: UUID,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Open a shared topic read-only: its sources (metadata only)
+    and its banks. The recipient takes quizzes from the banks and
+    can clone the topic; they cannot change it here."""
+    bucket, share = _get_shared_bucket_or_404(db, bucket_id, current_user)
+    owner = db.query(db_models.User).filter(
+        db_models.User.id == bucket.user_id).first()
+    return SharedTopicDetailResponse(
+        id=bucket.id,
+        title=bucket.title,
+        description=bucket.description,
+        owner_name=owner.full_name if owner else None,
+        owner_email=owner.email if owner else "",
+        shared_at=share.created_at,
+        created_at=bucket.created_at,
+        sources=[source_to_response(s) for s in sorted(
+            bucket.sources, key=lambda s: s.created_at)],
+        banks=[bank_to_response(db, b) for b in sorted(
+            bucket.banks, key=lambda b: b.created_at, reverse=True)],
+    )
+
+
+@app.get("/api/shared-topics/{bucket_id}/items")
+def get_shared_topic_items(
+    bucket_id: UUID,
+    bank_id: Optional[UUID] = None,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """The questions of a shared topic (one bank, or all of them).
+    Question content only -- no attempts, no evaluation."""
+    bucket, _share = _get_shared_bucket_or_404(db, bucket_id, current_user)
+    query = db.query(db_models.GeneratedQuestionItem).filter(
+        db_models.GeneratedQuestionItem.bucket_id == bucket.id
+    )
+    if bank_id:
+        query = query.filter(db_models.GeneratedQuestionItem.bank_id == bank_id)
+    return query.order_by(db_models.GeneratedQuestionItem.created_at.asc()).all()
+
+
+@app.post("/api/shared-topics/{bucket_id}/clone", response_model=TopicBucketResponse)
+def clone_shared_topic(
+    bucket_id: UUID,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Copy a shared topic into the caller's own library: all
+    sources (with their parsed content, copied into the caller's
+    own shared store), all banks, and all questions -- including
+    the model-generated per-question feedback, which is question
+    content. Attempts and evaluations are never copied: the clone
+    starts with no answers. The clone is fully the caller's to
+    change; the original is untouched."""
+    bucket, _share = _get_shared_bucket_or_404(db, bucket_id, current_user)
+    new_title = ("%s (copy)" % bucket.title)[:255]
+    new_bucket = db_models.TopicBucket(
+        user_id=current_user.id,
+        title=new_title,
+        description=bucket.description,
+    )
+    db.add(new_bucket)
+    db.flush()
+    for src in sorted(bucket.sources, key=lambda s: s.created_at):
+        parsed_id, reused, inline = _clone_source_parse(db, current_user, src)
+        db.add(db_models.TopicSource(
+            bucket_id=new_bucket.id,
+            source_type=src.source_type,
+            title=src.title,
+            purpose=getattr(src, "purpose", None) or "source",
+            is_concepts_source=bool(getattr(src, "is_concepts_source", None)),
+            source_url=src.source_url,
+            parsed_source_id=parsed_id,
+            reused=reused,
+            page_range=getattr(src, "page_range", None),
+            extracted_content=inline,
+        ))
+    bank_map = {}
+    for bank in sorted(bucket.banks, key=lambda b: b.created_at):
+        new_bank = db_models.QuestionBank(
+            bucket_id=new_bucket.id,
+            user_id=current_user.id,
+            title=bank.title,
+        )
+        db.add(new_bank)
+        db.flush()
+        bank_map[bank.id] = new_bank.id
+    for item in sorted(bucket.generated_items, key=lambda i: i.created_at):
+        db.add(db_models.GeneratedQuestionItem(
+            bucket_id=new_bucket.id,
+            bank_id=bank_map.get(item.bank_id),
+            catalog_typology=item.catalog_typology,
+            bloom_level=item.bloom_level,
+            question_type=item.question_type,
+            stem=item.stem,
+            stimulus=item.stimulus,
+            options=item.options,
+            correct_option=item.correct_option,
+            pedagogical_feedback=item.pedagogical_feedback,
+            distractor_rationales=item.distractor_rationales,
+            citation=item.citation,
+            detailed_feedback=item.detailed_feedback,
+        ))
+    db.commit()
+    db.refresh(new_bucket)
+    return TopicBucketResponse(
+        id=new_bucket.id,
+        title=new_bucket.title,
+        description=new_bucket.description,
+        created_at=new_bucket.created_at,
+        sources_count=len(new_bucket.sources),
+        items_count=len(new_bucket.generated_items),
+    )
+
+
+@app.get("/api/buckets/{bucket_id}/shares", response_model=List[TopicShareResponse])
+def list_shares(
+    bucket_id: UUID,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Who this topic is shared with. Owner only."""
+    bucket = get_bucket_or_404(db, bucket_id, current_user.id)
+    shares = db.query(db_models.TopicShare).filter(
+        db_models.TopicShare.bucket_id == bucket.id
+    ).order_by(db_models.TopicShare.created_at.asc()).all()
+    return [TopicShareResponse(
+        id=s.id,
+        bucket_id=s.bucket_id,
+        shared_with_email=s.shared_with_email,
+        created_at=s.created_at,
+    ) for s in shares]
+
+
+@app.post("/api/buckets/{bucket_id}/shares", response_model=TopicShareResponse)
+def add_share(
+    bucket_id: UUID,
+    req: TopicShareCreate,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Share this topic with one email address. The recipient sees
+    it in their "Shared topics" the next time they sign in -- even
+    when they have no account yet. Owner only."""
+    bucket = get_bucket_or_404(db, bucket_id, current_user.id)
+    try:
+        email = normalize_share_email(req.email)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if email == (getattr(current_user, "email", None) or "").strip().lower():
+        raise HTTPException(status_code=400, detail="This topic is already yours -- no need to share it with yourself.")
+    existing = db.query(db_models.TopicShare).filter(
+        db_models.TopicShare.bucket_id == bucket.id,
+        db_models.TopicShare.shared_with_email == email,
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="This topic is already shared with that email address.")
+    share = db_models.TopicShare(
+        bucket_id=bucket.id,
+        owner_user_id=current_user.id,
+        shared_with_email=email,
+    )
+    db.add(share)
+    db.commit()
+    db.refresh(share)
+    return TopicShareResponse(
+        id=share.id,
+        bucket_id=share.bucket_id,
+        shared_with_email=share.shared_with_email,
+        created_at=share.created_at,
+    )
+
+
+@app.delete("/api/buckets/{bucket_id}/shares/{share_id}")
+def remove_share(
+    bucket_id: UUID,
+    share_id: UUID,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Revoke one share. The recipient's clone, if they made one,
+    is theirs and stays. Owner only."""
+    bucket = get_bucket_or_404(db, bucket_id, current_user.id)
+    share = db.query(db_models.TopicShare).filter(
+        db_models.TopicShare.id == share_id,
+        db_models.TopicShare.bucket_id == bucket.id,
+    ).first()
+    if not share:
+        raise HTTPException(status_code=404, detail="Share not found.")
+    db.delete(share)
+    db.commit()
+    return {"status": "deleted"}
+
+
 @app.post("/api/buckets/{bucket_id}/generate")
 def generate_bucket_test(
     bucket_id: UUID,
@@ -1244,8 +1559,10 @@ def _topic_feedback_contexts(bucket):
 @app.post("/api/buckets/{bucket_id}/attempts", response_model=AttemptResponse)
 def record_attempt(bucket_id: UUID, req: AttemptCreate, current_user: db_models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Record one answered question. Correctness is computed
-    server-side from the stored correct option."""
-    bucket = get_bucket_or_404(db, bucket_id, current_user.id)
+    server-side from the stored correct option. Shared users
+    record under their own user id, so their attempts never
+    mix with the owner's."""
+    bucket, _is_owner = _get_owned_or_shared_bucket(db, bucket_id, current_user)
     item = db.query(db_models.GeneratedQuestionItem).filter(
         db_models.GeneratedQuestionItem.id == req.question_id,
         db_models.GeneratedQuestionItem.bucket_id == bucket.id,
@@ -1257,7 +1574,6 @@ def record_attempt(bucket_id: UUID, req: AttemptCreate, current_user: db_models.
         bank = db.query(db_models.QuestionBank).filter(
             db_models.QuestionBank.id == req.bank_id,
             db_models.QuestionBank.bucket_id == bucket.id,
-            db_models.QuestionBank.user_id == current_user.id,
         ).first()
         if not bank:
             raise HTTPException(status_code=404, detail="Question bank not found.")
@@ -1282,15 +1598,12 @@ def get_detailed_feedback(item_id: UUID, current_user: db_models.User = Depends(
     paragraph tying the correct answer to the key concept(s), plus
     a test-taking tip for this question. Generated on first view
     and cached on the item, so repeat views cost nothing."""
-    item = db.query(db_models.GeneratedQuestionItem).join(
-        db_models.TopicBucket,
-        db_models.GeneratedQuestionItem.bucket_id == db_models.TopicBucket.id,
-    ).filter(
+    item = db.query(db_models.GeneratedQuestionItem).filter(
         db_models.GeneratedQuestionItem.id == item_id,
-        db_models.TopicBucket.user_id == current_user.id,
     ).first()
     if not item:
         raise HTTPException(status_code=404, detail="Question not found.")
+    _bucket, is_owner = _get_owned_or_shared_bucket(db, item.bucket_id, current_user)
     if item.detailed_feedback:
         return DetailedFeedback.model_validate(item.detailed_feedback)
     source_context, concepts_context = _topic_feedback_contexts(item.bucket)
@@ -1314,8 +1627,12 @@ def get_detailed_feedback(item_id: UUID, current_user: db_models.User = Depends(
     except Exception as e:  # noqa: BLE001 - surface the real failure
         print(f"[DetailedFeedback] FAILED item={item_id}: {e}")
         raise HTTPException(status_code=502, detail=f"Could not generate detailed feedback: {e}")
-    item.detailed_feedback = fb.model_dump()
-    db.commit()
+    # Only the owner caches the feedback on the question row;
+    # a shared user gets the same generated feedback without
+    # writing to the owner's data.
+    if is_owner:
+        item.detailed_feedback = fb.model_dump()
+        db.commit()
     return fb
 
 
@@ -1326,8 +1643,10 @@ def get_topic_evaluation(bucket_id: UUID, current_user: db_models.User = Depends
     test-taking strategy. Below the minimum attempt count the
     endpoint says how many more answers are needed instead of
     guessing from too little data. Generated on demand, so it is
-    always current with the latest attempts."""
-    bucket = get_bucket_or_404(db, bucket_id, current_user.id)
+    always current with the latest attempts. Attempts are
+    filtered to the caller, so a shared user's evaluation
+    covers only their own answers, never the owner's."""
+    bucket, _is_owner = _get_owned_or_shared_bucket(db, bucket_id, current_user)
     attempts = db.query(db_models.QuestionAttempt).filter(
         db_models.QuestionAttempt.bucket_id == bucket.id,
         db_models.QuestionAttempt.user_id == current_user.id,

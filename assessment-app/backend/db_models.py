@@ -31,6 +31,34 @@ class TopicBucket(Base):
     sources = relationship("TopicSource", back_populates="bucket", cascade="all, delete-orphan")
     generated_items = relationship("GeneratedQuestionItem", back_populates="bucket", cascade="all, delete-orphan")
     banks = relationship("QuestionBank", back_populates="bucket", cascade="all, delete-orphan")
+    shares = relationship("TopicShare", back_populates="bucket", cascade="all, delete-orphan")
+
+
+class TopicShare(Base):
+    """One person a topic is shared with, keyed by their email
+    (lowercased). The recipient logs in with Google and the topic
+    appears in their "Shared topics" -- even when the share was
+    created before they ever had an account, because the match is
+    on email, not on a user id. A shared topic is read-only for
+    the recipient: they can view its sources and banks and take
+    its quizzes (their attempts are recorded under their own user
+    id, so the owner's answers and evaluation stay private), and
+    they can clone it into their own library. Deleting the topic
+    or the owner removes the share; revoking a share removes only
+    that row."""
+    __tablename__ = "topic_shares"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    bucket_id = Column(UUID(as_uuid=True), ForeignKey("topic_buckets.id", ondelete="CASCADE"), nullable=False)
+    owner_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    shared_with_email = Column(String(255), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    bucket = relationship("TopicBucket", back_populates="shares")
+
+    __table_args__ = (
+        UniqueConstraint("bucket_id", "shared_with_email", name="uq_topic_share_bucket_email"),
+    )
 
 class ParsedSource(Base):
     """One parsed upload, stored once per user per unique content --

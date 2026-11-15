@@ -40,6 +40,12 @@ interface QuestionBank {
   question_count: number;
 }
 
+interface TopicShare {
+  id: string;
+  shared_with_email: string;
+  created_at: string;
+}
+
 interface UploadResult {
   name: string;
   purpose: Purpose;
@@ -94,6 +100,11 @@ export default function BucketWorkspace() {
   const [reingestingId, setReingestingId] = useState<string | null>(null);
   const [pageRangeEditingId, setPageRangeEditingId] = useState<string | null>(null);
   const [pageRangeDraft, setPageRangeDraft] = useState("");
+  const [shares, setShares] = useState<TopicShare[]>([]);
+  const [shareEmail, setShareEmail] = useState("");
+  const [shareError, setShareError] = useState("");
+  const [sharing, setSharing] = useState(false);
+  const [removingShareId, setRemovingShareId] = useState<string | null>(null);
   // "topic": this topic's own example questions (current behaviour).
   // "none": ignore examples, the typology picker decides the type.
   // Otherwise a reference-set id: use that set's examples as the style.
@@ -182,6 +193,7 @@ export default function BucketWorkspace() {
   useEffect(() => {
     loadBanks();
     loadSources();
+    loadShares();
     apiFetch("/api/reference-sets").then(setReferenceSets).catch(() => setReferenceSets([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -318,6 +330,48 @@ export default function BucketWorkspace() {
     }
   };
 
+  const loadShares = async () => {
+    try {
+      setShares(await apiFetch(`/api/buckets/${id}/shares`));
+    } catch {
+      setShares([]);
+    }
+  };
+
+  const addShare = async () => {
+    const email = shareEmail.trim();
+    if (!email) return;
+    setShareError("");
+    setSharing(true);
+    try {
+      const created = await apiFetch(`/api/buckets/${id}/shares`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      setShares((prev) => [...prev, created]);
+      setShareEmail("");
+    } catch (err: any) {
+      setShareError(err?.message || "Could not share this topic");
+    } finally {
+      setSharing(false);
+    }
+  };
+
+  const removeShare = async (share: TopicShare) => {
+    if (!window.confirm(`Stop sharing this topic with ${share.shared_with_email}? They will lose access, but any clone they already made stays theirs.`)) return;
+    setShareError("");
+    setRemovingShareId(share.id);
+    try {
+      await apiFetch(`/api/buckets/${id}/shares/${share.id}`, { method: "DELETE" });
+      setShares((prev) => prev.filter((s) => s.id !== share.id));
+    } catch (err: any) {
+      setShareError(err?.message || "Could not remove this share");
+    } finally {
+      setRemovingShareId(null);
+    }
+  };
+
   const toggleConcepts = async (source: SourceItem) => {
     setSourceFlagError("");
     try {
@@ -388,6 +442,27 @@ export default function BucketWorkspace() {
           <Play className="h-4 w-4" />
           <span>Question Banks ({banks.length})</span>
         </button>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-2xl px-5 py-4 mb-8">
+        <h3 className="font-bold text-slate-900">Sharing</h3>
+        <p className="text-xs text-slate-500 mt-1">Share this topic by email. They will see it in their Shared topics, can take its quizzes, and can clone it into their own library. They can&apos;t change it, and they can&apos;t see your answers or your evaluation.</p>
+        <form onSubmit={(e) => { e.preventDefault(); addShare(); }} className="flex items-center gap-2 mt-3">
+          <input value={shareEmail} onChange={(e) => setShareEmail(e.target.value)} placeholder="name@gmail.com" type="email" aria-label="Email address to share with" className="flex-1 min-w-0 px-3 py-2 border rounded-lg text-sm" />
+          <button type="submit" disabled={sharing || !shareEmail.trim()} className="text-sm font-semibold px-3 py-2 rounded-lg bg-indigo-600 text-white disabled:opacity-50 shrink-0">{sharing ? "Sharing..." : "Share"}</button>
+        </form>
+        {shareError && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mt-3">{shareError}</p>}
+        {shares.length > 0 && (
+          <ul className="mt-3 space-y-1">
+            {shares.map((s) => (
+              <li key={s.id} className="flex items-center gap-2 text-sm text-slate-700">
+                <span className="flex-1 min-w-0 truncate">{s.shared_with_email}</span>
+                <span className="text-xs text-slate-400 shrink-0">shared {new Date(s.created_at).toLocaleDateString()}</span>
+                <button onClick={() => removeShare(s)} disabled={removingShareId === s.id} title="Stop sharing with this person" className="text-slate-400 hover:text-red-600 shrink-0"><X className="h-4 w-4" /></button>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {activeTab === "sources" ? (
