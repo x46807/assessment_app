@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from database import Base
@@ -42,6 +42,13 @@ class TopicSource(Base):
     # "source": content questions are generated from.
     # "example": sample questions used as style examples only.
     purpose = Column(String(20), nullable=False, default="source", server_default="source")
+    # True when the user flagged this source as holding the high-level
+    # concepts / objectives (e.g. a course outline or summary slides)
+    # that questions should validate understanding of. A flagged
+    # source defines WHAT to test; the other sources hold the detail
+    # the questions are grounded in, so it is not itself question
+    # content.
+    is_concepts_source = Column(Boolean, nullable=False, default=False, server_default="false")
     source_url = Column(Text, nullable=True)
     extracted_content = Column(JSONB, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)

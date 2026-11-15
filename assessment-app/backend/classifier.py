@@ -29,6 +29,49 @@ class SourceLinkage(BaseModel):
     question_source_patterns: List[str] = []
 
 
+class KeyConcept(BaseModel):
+    """One key concept / learning objective the student should
+    understand, and what that understanding looks like (beyond
+    recalling a fact)."""
+    concept: str
+    understanding: str = ""
+
+
+class KeyConcepts(BaseModel):
+    concepts: List[KeyConcept] = []
+
+
+class KeyConceptExtractor:
+    """Read source material and identify the key concepts and
+    learning objectives a student should understand. Used when
+    "conceptual understanding" is enabled at generation time and
+    no source was manually flagged as holding the concepts."""
+
+    def __init__(self, api_key: str = None):
+        self.client = make_gemini_client(api_key)
+
+    def extract_concepts(self, source_text: str) -> KeyConcepts:
+        prompt = (
+            "You are an expert teacher. Read the source material below and identify the key concepts and "
+            "learning objectives a student should understand from it. Aim for 5 to 10 concepts. For each, "
+            "state the concept and what it means to understand it -- the understanding a question should "
+            "validate -- not just a fact to recall. For example, for a source about trade routes, a concept "
+            "might be 'how monsoon winds shaped which routes merchants could use', with understanding "
+            "'the student can explain why a route was only usable in certain months'.\n\n"
+            "SOURCE MATERIAL:\n" + source_text[:8000] + "\n"
+        )
+        response = self.client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=gemini_response_schema(KeyConcepts),
+                temperature=0.3,
+            )
+        )
+        return KeyConcepts.model_validate_json(response.text)
+
+
 class SampleClassifier:
     def __init__(self, api_key: str = None):
         self.client = make_gemini_client(api_key)

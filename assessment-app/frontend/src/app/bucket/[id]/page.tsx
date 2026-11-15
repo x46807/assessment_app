@@ -13,6 +13,7 @@ interface SourceItem {
   title: string;
   source_type: string;
   purpose: Purpose;
+  is_concepts_source: boolean;
   source_url?: string | null;
   chunks: number;
   images?: number;
@@ -81,6 +82,8 @@ export default function BucketWorkspace() {
   const [questionCount, setQuestionCount] = useState(3);
   const [typology, setTypology] = useState("SCENARIO_VIGNETTE");
   const [injectStimulus, setInjectStimulus] = useState(false);
+  const [conceptualUnderstanding, setConceptualUnderstanding] = useState(false);
+  const [sourceFlagError, setSourceFlagError] = useState("");
   // "topic": this topic's own example questions (current behaviour).
   // "none": ignore examples, the typology picker decides the type.
   // Otherwise a reference-set id: use that set's examples as the style.
@@ -277,11 +280,26 @@ export default function BucketWorkspace() {
     }
   };
 
+  const toggleConcepts = async (source: SourceItem) => {
+    setSourceFlagError("");
+    try {
+      const updated = await apiFetch(`/api/buckets/${id}/sources/${source.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_concepts_source: !source.is_concepts_source }),
+      });
+      setSources((prev) => prev.map((s) => (s.id === source.id ? updated : s)));
+    } catch (err: any) {
+      setSourceFlagError(err?.message || "Could not update the flag");
+    }
+  };
+
   const handleGenerate = async () => {
     try {
       setGenerating(true);
       setGenerateError("");
       const body: any = { count: questionCount, target_typology: typology, inject_external_stimulus: injectStimulus };
+      if (conceptualUnderstanding) body.conceptual_understanding = true;
       if (styleChoice === "none") {
         body.use_topic_examples = false;
       } else if (styleChoice !== "topic") {
@@ -451,7 +469,8 @@ export default function BucketWorkspace() {
               <h3 className="font-bold text-slate-900">Uploaded files</h3>
               <span className="text-xs text-slate-500">{sources.length} total · {sourceCount} source material · {exampleCount} example questions</span>
             </div>
-            <p className="text-xs text-slate-500 mb-4">Everything ingested into this topic, with what each file is used for. Questions are generated from source material only.</p>
+            <p className="text-xs text-slate-500 mb-4">Everything ingested into this topic, with what each file is used for. Questions are generated from source material only. Flag a source — e.g. a course outline or summary slides — as holding the key concepts, and generation can test understanding of them.</p>
+            {sourceFlagError && <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-4">{sourceFlagError}</p>}
             {loadingSources ? (
               <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-indigo-600" /></div>
             ) : sources.length === 0 ? (
@@ -472,6 +491,15 @@ export default function BucketWorkspace() {
                     <span className={`text-xs font-semibold px-2 py-1 rounded-full shrink-0 ${s.purpose === "example" ? "bg-amber-100 text-amber-800" : "bg-indigo-100 text-indigo-800"}`}>
                       {PURPOSE_LABEL[s.purpose] || "Source material"}
                     </span>
+                    {s.purpose === "source" && (
+                      <button
+                        onClick={() => toggleConcepts(s)}
+                        title={s.is_concepts_source ? "Unmark as key concepts" : "Flag as holding the key concepts / objectives for this topic"}
+                        className={`text-xs font-semibold px-2 py-1 rounded-full shrink-0 ${s.is_concepts_source ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-200" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+                      >
+                        {s.is_concepts_source ? "Key concepts ✓" : "Mark as key concepts"}
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -491,6 +519,9 @@ export default function BucketWorkspace() {
               )}
               {styleChoice === "none" && (
                 <p className="text-xs text-slate-500 mt-1">Ignoring this topic&apos;s example questions — the typology picker below decides the question type.</p>
+              )}
+              {sources.filter((s) => s.is_concepts_source).length > 0 && (
+                <p className="text-xs text-emerald-700 mt-1">Key concepts flagged from: {sources.filter((s) => s.is_concepts_source).map((s) => s.title).join(", ")} — enable &ldquo;Conceptual understanding&rdquo; below to test against them.</p>
               )}
               <p className="text-xs text-slate-500 mt-1">Generation can take a minute or two &mdash; please keep this tab open while it runs.</p>
               </div>
@@ -536,6 +567,12 @@ export default function BucketWorkspace() {
               <div className="flex items-center space-x-2 pt-5">
                 <input type="checkbox" id="stimulusToggle" checked={injectStimulus} onChange={(e) => setInjectStimulus(e.target.checked)} className="h-4 w-4 rounded text-indigo-600" />
                 <label htmlFor="stimulusToggle" className="font-medium">Fetch External Stimulus (Map / Quote)</label>
+              </div>
+              <div className="flex items-start space-x-2 pt-5">
+                <input type="checkbox" id="conceptualToggle" checked={conceptualUnderstanding} onChange={(e) => setConceptualUnderstanding(e.target.checked)} className="h-4 w-4 rounded text-indigo-600 mt-0.5" />
+                <label htmlFor="conceptualToggle" className="font-medium">Conceptual understanding
+                  <span className="block font-normal text-slate-500">Guide generation by key concepts &amp; objectives{sources.filter((s) => s.is_concepts_source).length > 0 ? " from your flagged source(s)" : " — identified automatically from your sources"}.</span>
+                </label>
               </div>
             </div>
           </div>

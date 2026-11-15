@@ -31,6 +31,9 @@ class SourceResponse(BaseModel):
     title: str
     source_type: str
     purpose: str = "source"
+    # True when the user flagged this source as holding the
+    # high-level concepts / objectives for the topic.
+    is_concepts_source: bool = False
     source_url: Optional[str] = None
     chunks: int = 0
     images: int = 0
@@ -52,6 +55,10 @@ class QuestionBankResponse(BaseModel):
 
 class QuestionBankRename(BaseModel):
     title: str
+
+
+class SourceFlagRequest(BaseModel):
+    is_concepts_source: bool
 
 
 class ReferenceSetResponse(BaseModel):
@@ -97,3 +104,9 @@ class GenerateRequest(BaseModel):
     # Add the new questions to this existing bank instead of creating
     # a new one. Must belong to the same topic; omitted = new bank.
     bank_id: Optional[UUID] = None
+    # When True, guide generation by the topic's key concepts and
+    # objectives: from a source flagged as holding them, or -- when
+    # none is flagged -- identified automatically from the source
+    # material. Questions should validate understanding of those
+    # concepts, not just recall.
+    conceptual_understanding: bool = False

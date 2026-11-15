@@ -14,10 +14,10 @@ from sqlalchemy.orm import Session
 from database import Base, engine, get_db
 import db_models
 from auth import verify_google_token, create_access_token, get_current_user
-from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse, QuestionBankResponse, QuestionBankRename
+from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse, QuestionBankResponse, QuestionBankRename, SourceFlagRequest
 from pipeline import MasterIngestionPipeline
 from generator import QuestionGeneratorEngine
-from classifier import SampleClassifier
+from classifier import SampleClassifier, KeyConceptExtractor
 from models import IngestionResult
 
 Base.metadata.create_all(bind=engine)
@@ -30,6 +30,15 @@ try:
         _conn.execute(text("ALTER TABLE topic_sources ADD COLUMN IF NOT EXISTS purpose VARCHAR(20) NOT NULL DEFAULT 'source'"))
 except Exception as _e:  # noqa: BLE001 - startup must not fail on this
     print(f"[Startup] Could not ensure topic_sources.purpose column: {_e}")
+
+# Existing databases were created before sources gained an
+# `is_concepts_source` flag, and create_all() does not alter
+# existing tables.
+try:
+    with engine.begin() as _conn:
+        _conn.execute(text("ALTER TABLE topic_sources ADD COLUMN IF NOT EXISTS is_concepts_source BOOLEAN NOT NULL DEFAULT FALSE"))
+except Exception as _e:  # noqa: BLE001 - startup must not fail on this
+    print(f"[Startup] Could not ensure topic_sources.is_concepts_source column: {_e}")
 
 # Existing databases were created before reference examples gained a
 # `purpose` column, and create_all() does not alter existing tables.
@@ -188,6 +197,7 @@ def source_to_response(source):
         title=source.title,
         source_type=source.source_type,
         purpose=getattr(source, "purpose", None) or "source",
+        is_concepts_source=bool(getattr(source, "is_concepts_source", None)),
         source_url=source.source_url,
         chunks=chunks,
         images=images,
@@ -391,6 +401,33 @@ def list_bucket_sources(
     bucket = get_bucket_or_404(db, bucket_id, current_user.id)
     sources = sorted(bucket.sources, key=lambda src: src.created_at or datetime.min)
     return [source_to_response(src) for src in sources]
+
+@app.patch("/api/buckets/{bucket_id}/sources/{source_id}", response_model=SourceResponse)
+def flag_source_concepts(
+    bucket_id: UUID,
+    source_id: UUID,
+    req: SourceFlagRequest,
+    current_user: db_models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Flag (or unflag) a source as holding the topic's high-level
+    concepts / objectives -- e.g. a course outline or summary slides.
+    A flagged source defines WHAT to test when "conceptual
+    understanding" is enabled at generation time; it is not itself
+    question content."""
+    bucket = get_bucket_or_404(db, bucket_id, current_user.id)
+    src = db.query(db_models.TopicSource).filter(
+        db_models.TopicSource.id == source_id,
+        db_models.TopicSource.bucket_id == bucket.id,
+    ).first()
+    if not src:
+        raise HTTPException(status_code=404, detail="Source not found in this topic.")
+    if (getattr(src, "purpose", None) or "source") != "source":
+        raise HTTPException(status_code=400, detail="Only source material can be flagged as key concepts; example questions cannot.")
+    src.is_concepts_source = req.is_concepts_source
+    db.commit()
+    return source_to_response(src)
+
 
 def get_reference_set_or_404(db, set_id, user_id):
     ref_set = db.query(db_models.ReferenceSet).filter(
@@ -697,8 +734,15 @@ def generate_bucket_test(
     # Only source material is question content. Example questions are
     # style examples; their text must not be used as grounding content.
     generate_started = time.monotonic()
+    # A source flagged as holding the key concepts / objectives is
+    # not question content: it defines WHAT to test, while the other
+    # sources hold the detail the questions are grounded in.
     content_sources = [src for src in bucket.sources
-                       if (getattr(src, "purpose", None) or "source") == "source"]
+                       if (getattr(src, "purpose", None) or "source") == "source"
+                       and not getattr(src, "is_concepts_source", None)]
+    flagged_concepts_sources = [src for src in bucket.sources
+                                if (getattr(src, "purpose", None) or "source") == "source"
+                                and getattr(src, "is_concepts_source", None)]
     # Style source, in order: a chosen reference set, this topic's own
     # example questions, or nothing (the typology picker is the fallback).
     # A reference set never becomes question content; it only sets style.
@@ -723,11 +767,14 @@ def generate_bucket_test(
         example_sources = []
     print("[Generate] bucket=%s sources=%d examples=%d count=%s style=%s" % (bucket_id, len(content_sources), len(example_sources), req.count, style_label or "typology picker"))
     if not content_sources:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot generate questions. This bucket has no source material yet. "
-                   "Example questions are style examples and are not used as question content.",
-        )
+        if bucket.sources:
+            detail = ("Cannot generate questions. This topic has no detailed source material yet -- "
+                    "only example questions and/or key-concept outlines. Add the detailed material "
+                    "the questions should be grounded in.")
+        else:
+            detail = ("Cannot generate questions. This bucket has no source material yet. "
+                    "Example questions are style examples and are not used as question content.")
+        raise HTTPException(status_code=400, detail=detail)
 
     all_chunks = []
     all_images = []
@@ -760,6 +807,54 @@ def generate_bucket_test(
     if req.custom_style_instructions:
         style_instructions = (style_instructions + chr(10) + req.custom_style_instructions
                               if style_instructions else req.custom_style_instructions)
+    # Conceptual understanding: guide generation by the topic's key
+    # concepts and objectives. A manually flagged source takes
+    # priority; otherwise the model identifies the concepts from the
+    # detailed source material. Either way the directive says WHAT
+    # to test -- the facts still come only from the source material.
+    if req.conceptual_understanding:
+        concepts_directive = None
+        if flagged_concepts_sources:
+            flagged_text = ""
+            for src in flagged_concepts_sources:
+                try:
+                    src_data = IngestionResult.model_validate(src.extracted_content)
+                    flagged_text += src_data.to_llm_context() + chr(10)
+                except Exception as e:
+                    print("[Generate] Skipping unreadable concepts source %s: %s" % (getattr(src, "id", "?"), e))
+            flagged_text = flagged_text.strip()
+            if flagged_text:
+                concepts_directive = (
+                    "KEY CONCEPTS AND OBJECTIVES -- from the source(s) you flagged as holding them " + chr(10)
+                    + flagged_text[:4000] + chr(10)
+                    + "Ensure the questions you generate collectively cover these key concepts and objectives. "
+                    "Each question should validate the student's UNDERSTANDING of one of them -- test whether "
+                    "the student grasps the concept, not whether they can recall a phrase. Ground every "
+                    "question's facts in the detailed source material above, not in this objectives list."
+                )
+                print("[Generate] Conceptual mode: using %d flagged concepts source(s)" % len(flagged_concepts_sources))
+        if not concepts_directive:
+            try:
+                extracted = KeyConceptExtractor().extract_concepts(composite_source.to_llm_context())
+                if extracted.concepts:
+                    lines = ["- %s: %s" % (c.concept, c.understanding or "understand this concept")
+                             for c in extracted.concepts]
+                    concepts_directive = (
+                        "KEY CONCEPTS AND OBJECTIVES -- identified automatically from the source material:" + chr(10)
+                        + chr(10).join(lines) + chr(10)
+                        + "Ensure the questions you generate collectively cover these key concepts and objectives. "
+                        "Each question should validate the student's UNDERSTANDING of one of them -- test whether "
+                        "the student grasps the concept, not whether they can recall a phrase. Ground every "
+                        "question's facts in the detailed source material above, not in this list."
+                    )
+                    print("[Generate] Conceptual mode: auto-identified %d key concept(s)" % len(extracted.concepts))
+            except Exception as e:
+                # Auto-extraction must never break generation: the
+                # set is generated as normal, without the directive.
+                print("[Generate] Key-concept extraction failed, continuing without it: %s" % e)
+        if concepts_directive:
+            style_instructions = (style_instructions + chr(10) + concepts_directive
+                                  if style_instructions else concepts_directive)
     print("[Generate] effective_typology=%s style_examples=%s" % (effective_typology, "yes" if style_examples else "no"))
     # The 60% text / 40% visual split for stimulus-format sets is
     # decided inside the generator (it rolls once per generation);
