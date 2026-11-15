@@ -297,7 +297,7 @@ def _store_shared_parse(db, user_id, kind, content_hash, title, result):
     caller's commit persists it. Returns the shared row id."""
     row_id = db.execute(text(
         "INSERT INTO parsed_sources (id, user_id, kind, content_hash, title, parsed_content, parser_version, created_at, last_used_at) "
-        "VALUES (:id, :user_id, :kind, :content_hash, :title, :parsed_content::jsonb, :parser_version, NOW(), NOW()) "
+        "VALUES (:id, :user_id, :kind, :content_hash, :title, CAST(:parsed_content AS jsonb), :parser_version, NOW(), NOW()) "
         "ON CONFLICT (user_id, kind, content_hash) DO UPDATE SET "
         "parsed_content = EXCLUDED.parsed_content, parser_version = EXCLUDED.parser_version, "
         "title = EXCLUDED.title, last_used_at = NOW() "
