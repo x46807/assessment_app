@@ -1386,6 +1386,10 @@ def generate_bucket_test(
     # priority; otherwise the model identifies the concepts from the
     # detailed source material. Either way the directive says WHAT
     # to test -- the facts still come only from the source material.
+    # concept_list is the same concepts as a list, so the generator
+    # can spread the questions evenly across them (John, 2026-11-15)
+    # instead of letting every question cluster on one concept.
+    concept_list = None
     if req.conceptual_understanding:
         concepts_directive = None
         if flagged_concepts_sources:
@@ -1407,6 +1411,18 @@ def generate_bucket_test(
                     "question's facts in the detailed source material above, not in this objectives list."
                 )
                 print("[Generate] Conceptual mode: using %d flagged concepts source(s)" % len(flagged_concepts_sources))
+                # The flagged text is prose, not a list: extract the
+                # concept list from it so the questions can be spread
+                # across the concepts. Failure degrades to the overall
+                # directive only -- generation never breaks.
+                try:
+                    flagged_concepts = KeyConceptExtractor().extract_concepts(flagged_text)
+                    if flagged_concepts.concepts:
+                        concept_list = ["%s: %s" % (c.concept, c.understanding or "understand this concept")
+                                        for c in flagged_concepts.concepts]
+                        print("[Generate] Conceptual mode: %d concept(s) listed from flagged source(s)" % len(concept_list))
+                except Exception as e:
+                    print("[Generate] Concept list extraction from flagged source failed, continuing without it: %s" % e)
         if not concepts_directive:
             try:
                 extracted = KeyConceptExtractor().extract_concepts(composite_source.to_llm_context())
@@ -1421,6 +1437,8 @@ def generate_bucket_test(
                         "the student grasps the concept, not whether they can recall a phrase. Ground every "
                         "question's facts in the detailed source material above, not in this list."
                     )
+                    concept_list = ["%s: %s" % (c.concept, c.understanding or "understand this concept")
+                                    for c in extracted.concepts]
                     print("[Generate] Conceptual mode: auto-identified %d key concept(s)" % len(extracted.concepts))
             except Exception as e:
                 # Auto-extraction must never break generation: the
@@ -1430,9 +1448,13 @@ def generate_bucket_test(
             style_instructions = (style_instructions + chr(10) + concepts_directive
                                   if style_instructions else concepts_directive)
     print("[Generate] effective_typology=%s style_examples=%s" % (effective_typology, "yes" if style_examples else "no"))
-    # The 60% text / 40% visual split for stimulus-format sets is
-    # decided inside the generator (it rolls once per generation);
-    # an explicit preference in the request is passed through as-is.
+    # The generator rotates stimuli across chunks of at most 3
+    # questions, so no quote or image is shared by more than 3
+    # questions (John, 2026-11-15), and the 60% text / 40% visual
+    # split for stimulus-format sets is assigned across those
+    # chunks; an explicit preference in the request is passed
+    # through as-is. When concepts are available (above), the
+    # generator also spreads the questions evenly across them.
     preferred_stimulus_modality = req.preferred_stimulus_modality
     style_started = time.monotonic()
     try:
@@ -1446,6 +1468,7 @@ def generate_bucket_test(
             custom_style_instructions=style_instructions,
             style_examples=style_examples,
             source_images=all_images,
+            concepts=concept_list,
         )
     except Exception as e:
         print("[Generate] FAILED after %.1fs: %s: %s" % (time.monotonic() - generate_started, type(e).__name__, e))

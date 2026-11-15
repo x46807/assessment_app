@@ -28,13 +28,18 @@ class StimulusOrchestrator:
     def __init__(self, api_key: Optional[str] = None):
         self.client = make_gemini_client(api_key)
 
-    def _pick_source_image(self, source_text: str, source_images: List[dict]) -> Optional[StimulusContext]:
+    def _pick_source_image(self, source_text: str, source_images: List[dict],
+                           exclude_contents: Optional[List[str]] = None) -> Optional[StimulusContext]:
         """Ask Flash to choose the best stimulus among the source
         material's own embedded images. The model sees the images,
         so the choice is by content, not by filename or guesswork.
         Returns None when no image is suitable -- the caller then
-        falls back to a text passage."""
-        images = source_images[:8]
+        falls back to a text passage. Images whose data URI is in
+        exclude_contents were already used for another chunk of
+        this generation, so they are not offered again."""
+        excluded = set(exclude_contents or [])
+        images = [img for img in (source_images or [])
+                  if img.get("data_uri", "") not in excluded][:8]
         parts = [
             "You are choosing a visual stimulus for assessment questions about the source text below. "
             "The images that follow were extracted from the source material itself. "
@@ -76,7 +81,25 @@ class StimulusOrchestrator:
             attribution_or_context="From %s, p. %s" % (chosen.get("source_file"), chosen.get("page")),
         )
 
-    def plan_and_fetch_stimulus(self, source_text: str, preferred_modality: Optional[str] = None, style_context: Optional[str] = None, source_images: Optional[List[dict]] = None) -> StimulusContext:
+    def plan_and_fetch_stimulus(self, source_text: str, preferred_modality: Optional[str] = None, style_context: Optional[str] = None, source_images: Optional[List[dict]] = None, exclude: Optional[List[StimulusContext]] = None) -> StimulusContext:
+        # Stimuli already used for an earlier chunk of this generation
+        # (John, 2026-11-15: no quote or image shared by more than 3
+        # questions). The planner is told not to repeat them, and the
+        # fetchers skip them, so each chunk gets a fresh stimulus.
+        exclude = exclude or []
+        exclude_note = ""
+        if exclude:
+            used_passages = [s.content for s in exclude if s.stimulus_type not in ("map", "illustration")]
+            used_images = [s.content for s in exclude if s.stimulus_type in ("map", "illustration")]
+            bits = []
+            if used_passages:
+                bits.append("passages already used -- write a DIFFERENT one, about a different episode, person, or theme: "
+                            + " | ".join(p[:200] for p in used_passages[:3]))
+            if used_images:
+                bits.append("images already used -- find a DIFFERENT map or illustration subject: "
+                            + " | ".join(u[:120] for u in used_images[:3]))
+            if bits:
+                exclude_note = "\n\nALREADY USED IN THIS ASSESSMENT -- do not repeat these:\n" + "\n".join(bits) + "\n"
         # preferred_modality was previously accepted and then ignored,
         # so a caller asking for a map got whatever the planner felt
         # like -- usually a text passage. When it is set, the plan is
@@ -103,6 +126,7 @@ class StimulusOrchestrator:
                 + (f"STYLE CONTEXT: {style_context}\n\n" if style_context else "")
                 + f"SOURCE:\n{source_text[:2500]}\n"
             )
+        plan_prompt += exclude_note
         response = self.client.models.generate_content(
             model="gemini-3.8-flash",  # was gemini-2.5-flash, retired 2026-11-02
             contents=plan_prompt,
@@ -121,11 +145,15 @@ class StimulusOrchestrator:
             query = plan.search_query_or_theme
             if "map" not in query.lower() and "illustration" not in query.lower():
                 query = query + " map"
-            media = WikimediaProvider.search_media(query)
+            media = WikimediaProvider.search_media(
+                query,
+                exclude_urls=[s.content for s in exclude if s.stimulus_type in ("map", "illustration")])
             if media:
                 return StimulusContext(stimulus_type="map", content=media["media_url"], attribution_or_context=media["attribution"])
             if source_images:
-                picked = self._pick_source_image(source_text, source_images)
+                picked = self._pick_source_image(
+                    source_text, source_images,
+                    exclude_contents=[s.content for s in exclude])
                 if picked:
                     return picked
             print(f"[Stimulus] no web or source image for {query!r}; falling back to a text passage")

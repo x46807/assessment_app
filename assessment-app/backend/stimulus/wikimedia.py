@@ -1,5 +1,5 @@
 import requests
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 
 class WikimediaProvider:
     COMMONS_API = "https://commons.wikimedia.org/w/api.php"
@@ -10,7 +10,8 @@ class WikimediaProvider:
     IMAGE_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml", "image/tiff"}
 
     @classmethod
-    def search_media(cls, query: str) -> Optional[Dict[str, Any]]:
+    def search_media(cls, query: str, exclude_urls: Optional[List[str]] = None,
+                     exclude_titles: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         """Find a usable map/illustration on Wikimedia Commons.
 
         Two attempts: first with the (valid, single-value) filetype:bitmap
@@ -18,17 +19,27 @@ class WikimediaProvider:
         "filetype:bitmap|drawing", which is not valid CirrusSearch syntax
         and returned zero hits for every query, so the map path silently
         degraded to a text passage on every generation.
+
+        exclude_urls / exclude_titles skip images already used for an
+        earlier chunk of the same generation (John, 2026-11-15: no
+        image shared by more than 3 questions), so each chunk gets a
+        fresh image; every returned title is tried, not just the
+        first three.
         """
+        excluded_urls = set(exclude_urls or [])
+        excluded_titles = set(exclude_titles or [])
         for srsearch in (f"{query} filetype:bitmap", query):
             titles = cls._search_titles(srsearch)
-            for title in titles[:3]:
+            for title in titles:
+                if title in excluded_titles:
+                    continue
                 info = cls._image_info(title)
                 if not info:
                     continue
                 if info.get("mime") not in cls.IMAGE_MIMES:
                     continue
                 media_url = info.get("thumburl") or info.get("url")
-                if not media_url:
+                if not media_url or media_url in excluded_urls:
                     continue
                 artist = info.get("extmetadata", {}).get("Artist", {}).get("value", "Public Domain")
                 print(f"[Wikimedia] {title} ({info.get('mime')}) -> {media_url[:100]}")

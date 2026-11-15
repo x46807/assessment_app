@@ -47,56 +47,75 @@ class DocumentParser:
         handled defensively and skipped on any error. Duplicates (the
         same image on several pages, or embedded twice) are dropped by
         content hash, and only the largest few are kept.
+
+        Speed matters here: a scanned textbook chapter can hold a
+        full-page image per page, and decoding every one just to keep
+        four would dominate ingestion -- and, on the free tier's
+        tenth of a CPU, push a single upload past the request
+        timeout. So the largest candidates are picked from the image
+        metadata first (width and height ride along in the
+        get_images tuple) and only those are extracted and decoded.
         """
         from PIL import Image
 
-        candidates = []
+        # Pass 1 -- metadata only: (area, page, xref) for every distinct
+        # image big enough to be a useful stimulus. No bytes are read.
+        ranked = []
         seen_xrefs = set()
-        seen_hashes = set()
         for page_num in range(len(doc)):
             for img in doc[page_num].get_images(full=True):
                 xref = img[0]
                 if xref in seen_xrefs:
                     continue
                 seen_xrefs.add(xref)
-                try:
-                    raw = doc.extract_image(xref)
-                    width, height = raw["width"], raw["height"]
-                    if width < MIN_IMAGE_DIMENSION or height < MIN_IMAGE_DIMENSION:
-                        continue
-                    digest = hashlib.sha256(raw["image"]).hexdigest()
-                    if digest in seen_hashes:
-                        continue
-                    seen_hashes.add(digest)
-                    pil = Image.open(io.BytesIO(raw["image"]))
-                    if pil.mode in ("RGBA", "LA", "PA"):
-                        background = Image.new("RGB", pil.size, (255, 255, 255))
-                        background.paste(pil, mask=pil.split()[-1])
-                        pil = background
-                    else:
-                        pil = pil.convert("RGB")
-                    pil.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.LANCZOS)
-                    buf = io.BytesIO()
-                    pil.save(buf, format="JPEG", quality=IMAGE_JPEG_QUALITY)
-                    data_uri = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
-                    candidates.append(SourceImage(
-                        image_id=f"{title}-p{page_num + 1}-{xref}",
-                        page=page_num + 1,
-                        source_file=title,
-                        mime_type="image/jpeg",
-                        data_uri=data_uri,
-                        width=pil.width,
-                        height=pil.height,
-                    ))
-                except Exception as e:
-                    print(f"[PDF] skipping unreadable embedded image xref={xref} on p.{page_num + 1}: {e}")
+                width, height = img[2], img[3]
+                if width < MIN_IMAGE_DIMENSION or height < MIN_IMAGE_DIMENSION:
                     continue
+                ranked.append((width * height, page_num + 1, xref))
+        # Largest first; ties break toward the earlier page.
+        ranked.sort(key=lambda c: (-c[0], c[1]))
+
+        # Pass 2 -- extract and decode only until the quota is met. A
+        # hash duplicate among the leaders is skipped and the next
+        # candidate takes its place, so the quota still fills.
+        candidates = []
+        seen_hashes = set()
+        for _area, page_num, xref in ranked:
+            if len(candidates) >= MAX_IMAGES_PER_PDF:
+                break
+            try:
+                raw = doc.extract_image(xref)
+                digest = hashlib.sha256(raw["image"]).hexdigest()
+                if digest in seen_hashes:
+                    continue
+                seen_hashes.add(digest)
+                pil = Image.open(io.BytesIO(raw["image"]))
+                if pil.mode in ("RGBA", "LA", "PA"):
+                    background = Image.new("RGB", pil.size, (255, 255, 255))
+                    background.paste(pil, mask=pil.split()[-1])
+                    pil = background
+                else:
+                    pil = pil.convert("RGB")
+                pil.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.LANCZOS)
+                buf = io.BytesIO()
+                pil.save(buf, format="JPEG", quality=IMAGE_JPEG_QUALITY)
+                data_uri = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+                candidates.append(SourceImage(
+                    image_id=f"{title}-p{page_num}-{xref}",
+                    page=page_num,
+                    source_file=title,
+                    mime_type="image/jpeg",
+                    data_uri=data_uri,
+                    width=pil.width,
+                    height=pil.height,
+                ))
+            except Exception as e:
+                print(f"[PDF] skipping unreadable embedded image xref={xref} on p.{page_num}: {e}")
+                continue
         # Keep the largest images: maps and full-page illustrations
         # carry the most stimulus value; icons were already filtered.
-        candidates.sort(key=lambda im: im.width * im.height, reverse=True)
-        kept = candidates[:MAX_IMAGES_PER_PDF]
-        kept.sort(key=lambda im: (im.page, im.image_id))
-        return kept
+        candidates.sort(key=lambda im: (im.page, im.image_id))
+        return candidates
 
     @staticmethod
     def parse_docx(file_path: str, title: str) -> IngestionResult:
