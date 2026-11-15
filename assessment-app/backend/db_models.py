@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean, Float
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from database import Base
@@ -54,6 +54,27 @@ class TopicSource(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     bucket = relationship("TopicBucket", back_populates="sources")
+
+class QuestionAttempt(Base):
+    """One answered question, recorded when the student submits an
+    answer in the quiz. Tier 2 topic evaluations are built from
+    these: the latest attempt per question counts, so a re-take
+    supersedes an earlier answer instead of inflating the count.
+    time_spent_seconds runs from the student's first choice on
+    the question to submit -- a deliberation-time proxy, not a
+    reading-time measure (all questions render on one page)."""
+    __tablename__ = "question_attempts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    bucket_id = Column(UUID(as_uuid=True), ForeignKey("topic_buckets.id", ondelete="CASCADE"), nullable=False)
+    bank_id = Column(UUID(as_uuid=True), ForeignKey("question_banks.id", ondelete="SET NULL"), nullable=True)
+    question_id = Column(UUID(as_uuid=True), ForeignKey("generated_questions.id", ondelete="CASCADE"), nullable=False)
+    selected_option = Column(String(20), nullable=False)
+    is_correct = Column(Boolean, nullable=False)
+    time_spent_seconds = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 
 class ReferenceSet(Base):
     """A named set of example questions, uploaded once and reusable
@@ -128,6 +149,9 @@ class GeneratedQuestionItem(Base):
     pedagogical_feedback = Column(Text, nullable=False)
     distractor_rationales = Column(JSONB, nullable=False)
     citation = Column(JSONB, nullable=False)
+    # Tier 1 detailed feedback (concept paragraph + strategy tip),
+    # generated on first view and cached so repeat views are free.
+    detailed_feedback = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     bucket = relationship("TopicBucket", back_populates="generated_items")

@@ -4,6 +4,7 @@ import React, { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import InteractiveQuiz from "@/components/InteractiveQuiz";
+import TopicEvaluation from "@/components/TopicEvaluation";
 import { UploadCloud, Link as LinkIcon, Sparkles, Loader2, Play, FileText, CheckCircle2, XCircle, X, Pencil, Trash2 } from "lucide-react";
 
 type Purpose = "source" | "example";
@@ -584,7 +585,7 @@ export default function BucketWorkspace() {
             <h3 className="font-bold text-slate-900 text-lg">{openBankObj.title}</h3>
             <p className="text-xs text-slate-500">{new Date(openBankObj.created_at).toLocaleString()} · {openBankObj.question_count} question{openBankObj.question_count === 1 ? "" : "s"}</p>
           </div>
-          {loadingBankItems ? <div className="flex justify-center py-20"><Loader2 className="h-8 w-8 animate-spin text-indigo-600" /></div> : <InteractiveQuiz items={bankItems} />}
+          {loadingBankItems ? <div className="flex justify-center py-20"><Loader2 className="h-8 w-8 animate-spin text-indigo-600" /></div> : <InteractiveQuiz items={bankItems} bucketId={id as string} bankId={openBankId} />}
         </div>
       ) : loadingBanks ? (
         <div className="flex justify-center py-20"><Loader2 className="h-8 w-8 animate-spin text-indigo-600" /></div>
@@ -592,6 +593,7 @@ export default function BucketWorkspace() {
         <p className="text-sm text-slate-500 py-10 text-center border-2 border-dashed border-slate-200 rounded-xl">No question banks yet. Generate items from the Sources tab and they will land in a bank here.</p>
       ) : (
         <div>
+          <TopicEvaluation bucketId={id as string} />
           <div className="mb-4">
             <h3 className="font-bold text-slate-900">Question Banks</h3>
             <p className="text-xs text-slate-500">{banks.reduce((n, b) => n + b.question_count, 0)} questions across {banks.length} bank{banks.length === 1 ? "" : "s"}, newest first. Click a bank to answer its questions.</p>

@@ -14,7 +14,8 @@ from sqlalchemy.orm import Session
 from database import Base, engine, get_db
 import db_models
 from auth import verify_google_token, create_access_token, get_current_user
-from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse, QuestionBankResponse, QuestionBankRename, SourceFlagRequest
+from api_schemas import GoogleAuthRequest, AuthResponse, TopicBucketCreate, TopicBucketResponse, GenerateRequest, SourceResponse, ReferenceSetCreate, ReferenceSetResponse, ReferenceExampleResponse, QuestionBankResponse, QuestionBankRename, SourceFlagRequest, AttemptCreate, AttemptResponse
+from feedback import FeedbackAnalyzer, DetailedFeedback
 from pipeline import MasterIngestionPipeline
 from generator import QuestionGeneratorEngine
 from classifier import SampleClassifier, KeyConceptExtractor
@@ -55,6 +56,15 @@ try:
         _conn.execute(text("ALTER TABLE generated_questions ADD COLUMN IF NOT EXISTS bank_id UUID"))
 except Exception as _e:  # noqa: BLE001 - startup must not fail on this
     print(f"[Startup] Could not ensure generated_questions.bank_id column: {_e}")
+
+# Existing databases were created before generated questions gained a
+# cached `detailed_feedback` column (tier 1 feedback), and
+# create_all() does not alter existing tables.
+try:
+    with engine.begin() as _conn:
+        _conn.execute(text("ALTER TABLE generated_questions ADD COLUMN IF NOT EXISTS detailed_feedback JSONB"))
+except Exception as _e:  # noqa: BLE001 - startup must not fail on this
+    print(f"[Startup] Could not ensure generated_questions.detailed_feedback column: {_e}")
 
 
 def normalize_purpose(purpose):
@@ -941,3 +951,184 @@ def get_bucket_items(
     if bank_id:
         query = query.filter(db_models.GeneratedQuestionItem.bank_id == bank_id)
     return query.order_by(db_models.GeneratedQuestionItem.created_at.asc()).all()
+
+
+# --- Two tiers of feedback: per-question detail + topic evaluation ---
+
+# How many answered questions a topic needs before its evaluation is
+# meaningful. The evaluation groups questions by concept and by
+# strategy, so a handful of answers cannot support it; ten is the
+# minimum for any per-concept signal, and the evaluation itself says
+# so when a concept rests on only one or two attempts.
+MIN_ATTEMPTS_FOR_EVALUATION = 10
+
+
+def _topic_feedback_contexts(bucket):
+    """Source text + key-concepts text for the feedback analyses.
+
+    The detailed source material grounds the feedback; a source
+    flagged as holding the key concepts / objectives supplies the
+    concepts (the same split generation uses)."""
+    content_sources = [src for src in bucket.sources
+                       if (getattr(src, "purpose", None) or "source") == "source"
+                       and not getattr(src, "is_concepts_source", None)]
+    flagged_concepts_sources = [src for src in bucket.sources
+                                if (getattr(src, "purpose", None) or "source") == "source"
+                                and getattr(src, "is_concepts_source", None)]
+    all_chunks = []
+    for src in content_sources:
+        src_data = IngestionResult.model_validate(src.extracted_content)
+        all_chunks.extend(fill_chunk_source_files(src_data.chunks, src.title))
+    composite = IngestionResult(
+        source_title=bucket.title,
+        source_type="text",
+        total_chunks=len(all_chunks),
+        chunks=all_chunks,
+    )
+    concepts_text = ""
+    for src in flagged_concepts_sources:
+        src_data = IngestionResult.model_validate(src.extracted_content)
+        concepts_text += "\n" + src_data.to_llm_context()
+    return composite.to_llm_context(), concepts_text
+
+
+@app.post("/api/buckets/{bucket_id}/attempts", response_model=AttemptResponse)
+def record_attempt(bucket_id: UUID, req: AttemptCreate, current_user: db_models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Record one answered question. Correctness is computed
+    server-side from the stored correct option."""
+    bucket = get_bucket_or_404(db, bucket_id, current_user.id)
+    item = db.query(db_models.GeneratedQuestionItem).filter(
+        db_models.GeneratedQuestionItem.id == req.question_id,
+        db_models.GeneratedQuestionItem.bucket_id == bucket.id,
+    ).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Question not found in this topic.")
+    bank = None
+    if req.bank_id:
+        bank = db.query(db_models.QuestionBank).filter(
+            db_models.QuestionBank.id == req.bank_id,
+            db_models.QuestionBank.bucket_id == bucket.id,
+            db_models.QuestionBank.user_id == current_user.id,
+        ).first()
+        if not bank:
+            raise HTTPException(status_code=404, detail="Question bank not found.")
+    attempt = db_models.QuestionAttempt(
+        user_id=current_user.id,
+        bucket_id=bucket.id,
+        bank_id=bank.id if bank else None,
+        question_id=item.id,
+        selected_option=req.selected_option,
+        is_correct=(req.selected_option == item.correct_option),
+        time_spent_seconds=req.time_spent_seconds,
+    )
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+    return attempt
+
+
+@app.get("/api/items/{item_id}/detailed-feedback", response_model=DetailedFeedback)
+def get_detailed_feedback(item_id: UUID, current_user: db_models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Tier 1: the deeper explanation for one question -- a
+    paragraph tying the correct answer to the key concept(s), plus
+    a test-taking tip for this question. Generated on first view
+    and cached on the item, so repeat views cost nothing."""
+    item = db.query(db_models.GeneratedQuestionItem).join(
+        db_models.TopicBucket,
+        db_models.GeneratedQuestionItem.bucket_id == db_models.TopicBucket.id,
+    ).filter(
+        db_models.GeneratedQuestionItem.id == item_id,
+        db_models.TopicBucket.user_id == current_user.id,
+    ).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Question not found.")
+    if item.detailed_feedback:
+        return DetailedFeedback.model_validate(item.detailed_feedback)
+    source_context, concepts_context = _topic_feedback_contexts(item.bucket)
+    stimulus_line = ""
+    if item.stimulus:
+        stimulus_line = "Stimulus: " + str(item.stimulus.get("content", "")) + "\n"
+    question_text = (
+        "Stem: " + item.stem + "\n"
+        + stimulus_line
+        + "Options:\n" + "\n".join(
+            str(o.get("label")) + ") " + str(o.get("text"))
+            for o in (item.options or []))
+        + "\nCorrect option: " + item.correct_option + "\n"
+        + "Short feedback: " + item.pedagogical_feedback + "\n"
+        + "Why the other options are wrong:\n" + "\n".join(
+            str(k) + ": " + str(v)
+            for k, v in (item.distractor_rationales or {}).items())
+    )
+    try:
+        fb = FeedbackAnalyzer().detailed_feedback(question_text, source_context, concepts_context)
+    except Exception as e:  # noqa: BLE001 - surface the real failure
+        print(f"[DetailedFeedback] FAILED item={item_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not generate detailed feedback: {e}")
+    item.detailed_feedback = fb.model_dump()
+    db.commit()
+    return fb
+
+
+@app.get("/api/buckets/{bucket_id}/evaluation")
+def get_topic_evaluation(bucket_id: UUID, current_user: db_models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Tier 2: evaluate one topic from the student's answered
+    questions -- strengths and weaknesses by concept and by
+    test-taking strategy. Below the minimum attempt count the
+    endpoint says how many more answers are needed instead of
+    guessing from too little data. Generated on demand, so it is
+    always current with the latest attempts."""
+    bucket = get_bucket_or_404(db, bucket_id, current_user.id)
+    attempts = db.query(db_models.QuestionAttempt).filter(
+        db_models.QuestionAttempt.bucket_id == bucket.id,
+        db_models.QuestionAttempt.user_id == current_user.id,
+    ).order_by(db_models.QuestionAttempt.created_at.asc()).all()
+    # The latest attempt per question counts: a re-take supersedes
+    # an earlier answer instead of inflating the count.
+    latest = {}
+    for a in attempts:
+        latest[a.question_id] = a
+    n = len(latest)
+    if n < MIN_ATTEMPTS_FOR_EVALUATION:
+        return {
+            "sufficient": False,
+            "attempts": n,
+            "minimum": MIN_ATTEMPTS_FOR_EVALUATION,
+            "correct": None,
+            "accuracy": None,
+            "evaluation": None,
+        }
+    correct = sum(1 for a in latest.values() if a.is_correct)
+    items = {it.id: it for it in db.query(db_models.GeneratedQuestionItem).filter(
+        db_models.GeneratedQuestionItem.bucket_id == bucket.id).all()}
+    lines = []
+    for a in latest.values():
+        it = items.get(a.question_id)
+        if not it:
+            continue
+        opts = "\n".join(
+            "  " + str(o.get("label")) + ") " + str(o.get("text"))
+            for o in (it.options or []))
+        spent = ("%ds" % a.time_spent_seconds) if a.time_spent_seconds is not None else "not recorded"
+        lines.append(
+            "Question: " + it.stem + "\n"
+            + "Type: " + it.catalog_typology + " / " + it.question_type + " / " + it.bloom_level + "\n"
+            + "Options:\n" + opts + "\n"
+            + "Correct option: " + it.correct_option + "\n"
+            + "Student answered: " + a.selected_option + " -- " + ("CORRECT" if a.is_correct else "INCORRECT") + "\n"
+            + "Time from first choice to submit: " + spent
+        )
+    _source_context, concepts_context = _topic_feedback_contexts(bucket)
+    try:
+        evaluation = FeedbackAnalyzer().evaluate_topic("\n\n".join(lines), concepts_context)
+    except Exception as e:  # noqa: BLE001 - surface the real failure
+        print(f"[TopicEvaluation] FAILED bucket={bucket_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not generate the topic evaluation: {e}")
+    return {
+        "sufficient": True,
+        "attempts": n,
+        "minimum": MIN_ATTEMPTS_FOR_EVALUATION,
+        "correct": correct,
+        "accuracy": round(correct / n, 3),
+        "evaluation": evaluation.model_dump(),
+    }

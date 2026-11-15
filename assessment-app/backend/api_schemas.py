@@ -61,6 +61,22 @@ class SourceFlagRequest(BaseModel):
     is_concepts_source: bool
 
 
+class AttemptCreate(BaseModel):
+    question_id: UUID
+    selected_option: str
+    # Seconds from the student's first choice on the question to
+    # submit; None when the frontend did not measure it.
+    time_spent_seconds: Optional[float] = None
+    bank_id: Optional[UUID] = None
+
+
+class AttemptResponse(BaseModel):
+    id: UUID
+    question_id: UUID
+    is_correct: bool
+    created_at: datetime
+
+
 class ReferenceSetResponse(BaseModel):
     id: UUID
     title: str
