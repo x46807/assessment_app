@@ -6,7 +6,7 @@ from google import genai
 from google.genai import types
 from models import IngestionResult
 from gemini_schema import gemini_response_schema, make_gemini_client
-from generation_schemas import GenerationBatchOutput, PsychometricItem, StimulusContext
+from generation_schemas import GenerationBatchOutput, PsychometricItem, QuestionOption, StimulusContext
 from stimulus.stimulus_orchestrator import StimulusOrchestrator
 
 
@@ -30,6 +30,48 @@ def _image_part(content: str):
     mime = "image/png" if content.lower().split("?")[0].endswith(".png") else "image/jpeg"
     return types.Part.from_uri(file_uri=content, mime_type=mime)
 
+
+OPTION_LABELS = ("A", "B", "C", "D")
+
+
+def _shuffle_item_options(item: PsychometricItem) -> PsychometricItem:
+    """Randomise the position of the correct answer (John, 2026-11-16).
+
+    The model writes the options in order and systematically favours
+    putting the correct answer first, and nothing in the pipeline ever
+    reordered them, so generated sets came out biased toward A. Shuffling
+    here -- after the model has finished, before the items are stored --
+    makes the correct answer equally likely to sit at any position no
+    matter what the model did. The option texts, the correct answer, and
+    the per-option distractor rationales all move together; only the
+    labels change. Multiple choice only: true/false keeps its
+    conventional True-then-False order and short answer has no options.
+    Items that do not look like a normal 4-option multiple-choice item
+    are left untouched rather than risk corrupting them.
+    """
+    if item.question_type != "multiple_choice":
+        return item
+    if len(item.options) != 4 or item.correct_option not in OPTION_LABELS:
+        return item
+    order = list(range(len(item.options)))
+    random.shuffle(order)
+    new_options = []
+    new_rationales = {}
+    new_correct = item.correct_option
+    for new_idx, old_idx in enumerate(order):
+        old = item.options[old_idx]
+        new_label = OPTION_LABELS[new_idx]
+        new_options.append(QuestionOption(label=new_label, text=old.text))
+        if old.label == item.correct_option:
+            new_correct = new_label
+        if old.label in (item.distractor_rationales or {}):
+            new_rationales[new_label] = item.distractor_rationales[old.label]
+    item.options = new_options
+    item.correct_option = new_correct
+    item.distractor_rationales = new_rationales
+    return item
+
+
 class QuestionGeneratorEngine:
     def __init__(self, api_key: str = None):
         self.client = make_gemini_client(api_key)
@@ -47,6 +89,7 @@ class QuestionGeneratorEngine:
             "   - Items must evaluate application, synthesis, or analysis. Use scenario-based stems.\n\n"
             "3. DISTRACTOR INTEGRITY:\n"
             "   - Exactly 4 options for Multiple Choice (A, B, C, D).\n"
+            "   - Vary the position of the correct answer across items: it must be equally likely to be A, B, C, or D. Do not favour putting it first.\n"
             "   - Homogeneity: All options must be syntactically parallel and roughly equal in length.\n"
             "   - NEVER use: 'All of the above', 'None of the above', 'Both A and B'.\n\n"
             "4. CITATION PRECISION:\n"
@@ -294,5 +337,7 @@ class QuestionGeneratorEngine:
                         item.stimulus = external_stimulus
                 elif external_stimulus and not item.stimulus:
                     item.stimulus = external_stimulus
+                # Randomise the answer position (see _shuffle_item_options).
+                _shuffle_item_options(item)
             all_items.extend(batch.items)
         return all_items
