@@ -7,7 +7,10 @@ class WikimediaProvider:
     # Image files the quiz frontend can display. PDFs are excluded even
     # though Commons returns them: a scanned book's first page is not a
     # map or illustration.
-    IMAGE_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml", "image/tiff"}
+    # No image/tiff: browsers cannot render TIFF in an <img> tag, and
+    # when no thumburl comes back the code falls back to the .tif
+    # original, which renders as a broken image (John, 2026-11-15).
+    IMAGE_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"}
 
     @classmethod
     def search_media(cls, query: str, exclude_urls: Optional[List[str]] = None,

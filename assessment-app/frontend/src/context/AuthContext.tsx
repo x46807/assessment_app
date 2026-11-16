@@ -64,7 +64,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const apiFetch = async (endpoint: string, options: RequestInit = {}) => {
     const headers = new Headers(options.headers || {});
-    if (token) headers.set("Authorization", `Bearer ${token}`);
+    // Read the token from storage at call time, not from the closed-over
+    // state: on a fresh page load the state is still null (it is restored
+    // in a useEffect) while the page's own mount effects are already
+    // firing requests. Using the state here sent the first requests with
+    // no Authorization header, the backend 401'd, and the 401 branch
+    // logged the user out of a valid session (John, 2026-11-15).
+    const currentToken = token || localStorage.getItem("auth_token");
+    if (currentToken) headers.set("Authorization", `Bearer ${currentToken}`);
 
     const res = await fetch(`${API_BASE}${endpoint}`, { ...options, headers });
     if (res.status === 401) {

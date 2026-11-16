@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import mermaid from "mermaid";
 import { Quote, Image as ImageIcon, GitFork, Table } from "lucide-react";
 
@@ -14,6 +14,7 @@ interface StimulusProps {
 
 export default function StimulusViewer({ stimulus }: StimulusProps) {
   const mermaidRef = useRef<HTMLDivElement>(null);
+  const [imgFailed, setImgFailed] = useState(false);
 
   useEffect(() => {
     if (stimulus.stimulus_type === "diagram" && mermaidRef.current) {
@@ -35,7 +36,13 @@ export default function StimulusViewer({ stimulus }: StimulusProps) {
       </div>
 
       {stimulus.stimulus_type === "map" || stimulus.stimulus_type === "illustration" ? (
-        <img src={stimulus.content} alt={stimulus.attribution_or_context} className="max-h-80 w-auto rounded-lg mx-auto border border-slate-200" />
+        imgFailed ? (
+          <div className="rounded-lg border border-slate-200 bg-white p-4 text-center text-sm text-slate-500">
+            This image could not be loaded. It may come from a set of questions generated before images were fetched from a real source &mdash; regenerating this bank will replace it with a working image.
+          </div>
+        ) : (
+          <img src={stimulus.content} alt={stimulus.attribution_or_context} onError={() => setImgFailed(true)} className="max-h-80 w-auto rounded-lg mx-auto border border-slate-200" />
+        )
       ) : stimulus.stimulus_type === "diagram" ? (
         <div ref={mermaidRef} className="flex justify-center my-4 overflow-x-auto" />
       ) : (
